@@ -1,0 +1,112 @@
+/* Matches the Student Exam Portal's font stack exactly (see root
+   index.html's Google Fonts link and src/App.css's --font-display/
+   --font-body/--font-mono): Sora for headings, Inter for body/UI, IBM
+   Plex Mono for tabular numbers. Weight sets are a superset of both
+   apps' actual usage so nothing already relying on a given weight here
+   regresses. */
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design system: clean white + professional orange. All color tokens
+   (ink neutral scale runs light→dark, surface/brand/accent/success/
+   warning/danger) live in tailwind.config.js — that file is the single
+   source of truth. Every component uses those token classes (bg-surface,
+   text-ink-500, border-ink-200, bg-brand-600, etc.); no hardcoded
+   hex/rgba colors in component files. Orange (brand) is the one accent
+   color — primary actions, active/focus states, and live highlights
+   only, against a white/near-white canvas everywhere else. */
+
+/* Scoped under .newadmin-root (the App.tsx wrapper) rather than
+   `body`/`*` directly, so these base styles only ever apply within the
+   admin dashboard's own root element.
+
+   Wrapped in @layer base so Tailwind splices this block in at the
+   "base" position — before any @tailwind utilities output — regardless
+   of where in this file it's written. That matters here: without it, a
+   plain default like `border-color` or `border-style` on a broad `*`
+   selector would compile AFTER (and therefore beat, at equal
+   specificity) a colored utility like `border-danger-200` or a style
+   utility like `border-dashed`, silently overriding it back to the
+   default everywhere it's used. Inside @layer base, utilities always
+   win instead, which is what a "default" is supposed to mean. */
+@layer base {
+  .newadmin-root {
+    @apply bg-ink-50 text-ink-900 font-sans antialiased;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  /* Display headings (page titles, card titles, modal titles) render in
+     Sora; everything else stays Inter — matching the Student Exam
+     Portal's --font-display/--font-body split exactly. Applied at the
+     base layer so individual components don't each need a font-display
+     class — utilities can still override per element if needed. */
+  .newadmin-root h1,
+  .newadmin-root h2,
+  .newadmin-root h3 {
+    @apply font-display;
+    letter-spacing: -0.01em;
+  }
+  /* Every tabular number in the app renders in IBM Plex Mono — the
+     signature "console" treatment. `.tabular-nums` is only ever applied
+     to numeric displays, so this scopes cleanly to them. */
+  .newadmin-root .tabular-nums {
+    font-family: theme('fontFamily.mono');
+    font-feature-settings: 'tnum';
+  }
+  .newadmin-root * {
+    box-sizing: border-box;
+    /* border-width MUST default to 0 here. Without it, border-style:
+       solid alone makes every element's browser-default border-width
+       ("medium", ~3px) actually render — a ~3px box around every div,
+       icon, label, and text block in the entire tree, since only
+       Tailwind's `border`/`border-{n}` utilities explicitly set a
+       width. Tailwind's own preflight does this too (it's just disabled
+       here) — this replicates that one rule on purpose. */
+    border-width: 0;
+    border-style: solid;
+    border-color: theme('colors.ink.200');
+  }
+  .newadmin-root ::selection {
+    @apply bg-brand-500 text-ink-50;
+  }
+  /* preflight is off, so nothing else neutralizes native <button> chrome.
+     Every button that doesn't set an explicit bg-* utility falls back to
+     the OS/browser default button face. This replicates just that piece
+     of preflight, scoped to the admin tree, so utilities still apply
+     cleanly on top. */
+  .newadmin-root button {
+    background-color: transparent;
+    background-image: none;
+    appearance: none;
+    -webkit-appearance: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+}
+
+@layer components {
+  /* Thin scrollbar for content areas (tables, modals, sidebar nav) — a
+     warm light-gray thumb on the white surface behind it. */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: #d6d3d1 transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: #d6d3d1;
+    border-radius: 9999px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background-color: #a8a29e;
+  }
+}
