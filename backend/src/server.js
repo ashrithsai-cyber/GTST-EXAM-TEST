@@ -6,6 +6,8 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const multer = require("multer");
+const { MOCK_VIDEO_MAX_MB } = require("./middleware/upload");
+const { resolveTrustProxy } = require("./utils/trustProxy");
 
 const examRoutes = require("./routes/exam.routes");
 const answerRoutes = require("./routes/answer.routes");
@@ -35,7 +37,6 @@ const adminRoutes = require("./routes/admin.routes");
 })();
 
 const app = express();
-app.set('trust proxy', 1);
 
 const PORT = process.env.PORT || 5000;
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
@@ -44,14 +45,11 @@ const IS_PRODUCTION = process.env.NODE_ENV === "production";
 // secrets. Supabase rejects tokens whose iat is ahead of its clock.
 console.log(`Backend clock: ${new Date().toISOString()}`);
 
-// Behind a reverse proxy / load balancer (Nginx, Render, Railway, etc.)
-// req.ip is the proxy's address unless Express is told how many proxy
-// hops to trust — without this every student would share one rate-limit
-// bucket. Set TRUST_PROXY to the number of proxies in front of the app.
-if (process.env.TRUST_PROXY) {
-    const hops = Number(process.env.TRUST_PROXY);
-    app.set("trust proxy", Number.isInteger(hops) ? hops : process.env.TRUST_PROXY);
-}
+// Real client IP for rate limiting — see utils/trustProxy.js. Set before
+// any route so every limiter sees the same req.ip.
+const TRUST_PROXY = resolveTrustProxy();
+app.set("trust proxy", TRUST_PROXY);
+console.log(`Trust proxy: ${JSON.stringify(TRUST_PROXY)}`);
 
 // Security
 app.use(helmet());
@@ -160,14 +158,32 @@ app.use((err, req, res, next) => {
         });
     }
 
+    // The client went away mid-request (closed the tab, lost the network,
+    // or a proxy cut a long upload). Not a server fault: no stack trace,
+    // and usually nobody left to answer.
+    if (["Request aborted", "Request closed", "Unexpected end of form"].includes(err.message)
+        || err.type === "request.aborted" || err.code === "ECONNRESET") {
+        console.warn(`Client disconnected during ${req.method} ${req.originalUrl} (${err.message})`);
+        if (req.socket.destroyed) return;
+        return res.status(400).json({
+            success: false,
+            message: "The upload was interrupted before it finished. Please try again."
+        });
+    }
+
     // Upload rejected by multer before reaching a controller (file over
     // the size limit, unexpected field name, ...) — a client error, not a
     // server one.
     if (err instanceof multer.MulterError) {
-        return res.status(err.code === "LIMIT_FILE_SIZE" ? 413 : 400).json({
-            success: false,
-            message: err.code === "LIMIT_FILE_SIZE" ? "The uploaded file is too large" : "Invalid file upload"
-        });
+        if (err.code === "LIMIT_FILE_SIZE") {
+            return res.status(413).json({
+                success: false,
+                message: err.field === "video"
+                    ? `The video is larger than the ${MOCK_VIDEO_MAX_MB} MB upload limit. Compress it (for example 720p H.264 MP4) and try again.`
+                    : "The uploaded file is too large"
+            });
+        }
+        return res.status(400).json({ success: false, message: "Invalid file upload" });
     }
 
     // Malformed JSON body / body over express.json()'s size limit.

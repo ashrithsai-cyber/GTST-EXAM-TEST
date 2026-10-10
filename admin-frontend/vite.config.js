@@ -6,11 +6,7 @@ import { defineConfig } from 'vite'
 // updating that env var too.
 export default defineConfig({
   plugins: [react()],
-<<<<<<< HEAD
-  base: '/admin/',
-=======
   base: '/',
->>>>>>> origin/main
   server: {
     port: 5174,
     strictPort: true,

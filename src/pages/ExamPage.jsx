@@ -12,7 +12,6 @@ import Footer from '../components/common/Footer';
 import ExamWaitingRoom from '../components/common/ExamWaitingRoom';
 import { usePreventBackNavigation } from '../hooks/usePreventBackNavigation';
 
-<<<<<<< HEAD
 // After the stable "no face" reading (~1.5 s, ~3 s in low light).
 const NO_FACE_GRACE_MS = 1000;
 // After the student closes a multiple-face warning, warn again this long
@@ -26,9 +25,6 @@ const MIC_ACTIVITY_LABEL = {
   noise: '✓ Active · Background noise',
   silence: '✓ Active · Quiet',
 };
-=======
-const NO_FACE_GRACE_MS = 3000;
->>>>>>> origin/main
 // Visual-only final-countdown warning on the overall exam timer. The
 // server-side deadline and the countdown itself are unchanged.
 const FINAL_WARNING_SECONDS = 20;
@@ -181,24 +177,15 @@ const ExamPage = () => {
   // there is no warning limit and nothing is blocked. If it wasn't recorded (check disabled in Exam Settings, or the
   // request failed) the popup would be a false claim, so the plain
   // banner is shown instead.
-<<<<<<< HEAD
   // Resolves true when the popup was shown.
-=======
->>>>>>> origin/main
   const reportViolation = useCallback(async (eventType, eventMessage, fallbackText) => {
     const response = await reportEventDetails(eventType, eventMessage);
     if (response && response.recorded !== false) {
       setViolation({ id: Date.now(), eventType });
-<<<<<<< HEAD
       return true;
     }
     if (fallbackText) addBanner('danger', fallbackText, 5000);
     return false;
-=======
-    } else if (fallbackText) {
-      addBanner('danger', fallbackText, 5000);
-    }
->>>>>>> origin/main
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reportEventDetails]);
 
@@ -322,23 +309,17 @@ const ExamPage = () => {
   // selected when the question first rendered.
   goNextRef.current = goNext;
 
-<<<<<<< HEAD
   // "No answer selected" warning, shown when Next is clicked with no
   // option chosen. Timer-driven advances never ask.
   const [noAnswerConfirmOpen, setNoAnswerConfirmOpen] = useState(false);
 
-=======
->>>>>>> origin/main
   const currentQuestionId = q?.id;
   useEffect(() => {
     questionStartRef.current = performance.now();
     advancingRef.current = false;
     setIsAdvancing(false);
-<<<<<<< HEAD
     // The question moved on (e.g. its timer ran out) — the warning no longer applies.
     setNoAnswerConfirmOpen(false);
-=======
->>>>>>> origin/main
   }, [currentQuestionId]);
 
   // The context anchors these countdowns to the server using performance.now.
@@ -541,7 +522,6 @@ const ExamPage = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [micReady, reportViolation, examSettings.microphoneRequired]);
 
-<<<<<<< HEAD
   // A device that stays open but delivers only digital zeros (hardware
   // mute switch, failed driver) is a microphone failure too. Quiet rooms
   // and soft speech never produce exact zeros, so this cannot fire for a
@@ -558,18 +538,11 @@ const ExamPage = () => {
   // pre-exam System Check). face.faceState is already smoothed over
   // several frames (utils/faceTracker.js); reports fire on genuine state
   // transitions only, with an extra grace period on "no face".
-=======
-  // Continuous face detection for the duration of the exam (not just
-  // pre-exam System Check) — reports on genuine state transitions only,
-  // with a grace period on "no face" so a brief look-away doesn't fire a
-  // warning immediately.
->>>>>>> origin/main
   const faceStateRef = useRef('single');
   const noFaceTimerRef = useRef(null);
   useEffect(() => {
     if (!examSettings.faceDetectionEnabled || !camera.ready || face.modelLoading || face.modelError) return undefined;
 
-<<<<<<< HEAD
     const state = face.faceState;
     if (state === 'checking') {
       // No usable frames right now — neither a violation nor a recovery.
@@ -581,16 +554,6 @@ const ExamPage = () => {
       // Reported by the multiple-face effect below.
       if (noFaceTimerRef.current) { clearTimeout(noFaceTimerRef.current); noFaceTimerRef.current = null; }
       faceStateRef.current = 'multiple';
-=======
-    const state = face.faceCount === 1 ? 'single' : face.faceCount === 0 ? 'none' : 'multiple';
-
-    if (state === 'multiple') {
-      if (noFaceTimerRef.current) { clearTimeout(noFaceTimerRef.current); noFaceTimerRef.current = null; }
-      if (faceStateRef.current !== 'multiple') {
-        faceStateRef.current = 'multiple';
-        reportViolation('MULTIPLE_FACE', `${face.faceCount} faces detected in frame.`, '⚠ Multiple faces detected.');
-      }
->>>>>>> origin/main
       return undefined;
     }
 
@@ -609,7 +572,6 @@ const ExamPage = () => {
     faceStateRef.current = 'single';
     return undefined;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-<<<<<<< HEAD
   }, [face.faceState, face.faceCount, face.modelLoading, face.modelError, camera.ready, reportViolation, examSettings.faceDetectionEnabled]);
 
   // Multiple faces: warn as soon as a second person is consistently seen,
@@ -646,9 +608,6 @@ const ExamPage = () => {
     }, delay);
     return () => clearTimeout(timer);
   }, [multipleActive, popupOpen, multipleRetry, face.faceState, reportViolation]);
-=======
-  }, [face.faceCount, face.modelLoading, face.modelError, camera.ready, reportViolation, examSettings.faceDetectionEnabled]);
->>>>>>> origin/main
 
   const handleReturnToFullscreen = enterFullscreen;
 
@@ -901,22 +860,12 @@ const ExamPage = () => {
             <div className="exam-actions-row">
               <button type="button" className="btn btn-secondary btn-sm" disabled={answerDisabled || ans.sel === null} onClick={clearResponse}>Clear answer</button>
               <div className="exam-actions-right">
-<<<<<<< HEAD
-=======
-                <button type="button" className="btn btn-secondary" disabled={submitting} onClick={() => setReviewOpen(true)}>Review</button>
-                <button type="button" className="btn btn-success" disabled={isAdvancing || submitting || !isOnline}
-                  onClick={() => { setSubmitError(''); setReviewOpen(false); setSubmitConfirmOpen(true); }}>Submit</button>
->>>>>>> origin/main
                 {/* Skip only moves past an unanswered question; with an
                     answer selected, Next saves it (Clear answer first to skip). */}
                 <button type="button" className="btn btn-skip" disabled={isAdvancing || submitting || !isOnline || ans.sel !== null}
                   title={ans.sel !== null ? 'Clear your answer to skip this question' : undefined} onClick={() => goNext()}>Skip</button>
-<<<<<<< HEAD
                 <button type="button" className="btn btn-primary" disabled={isAdvancing || submitting || !isOnline}
                   onClick={() => (ans.sel === null ? setNoAnswerConfirmOpen(true) : goNext())}>
-=======
-                <button type="button" className="btn btn-primary" disabled={isAdvancing || submitting || !isOnline} onClick={() => goNext()}>
->>>>>>> origin/main
                   {isAdvancing ? 'Saving…' : currentOverallNumber === totalQuestions ? 'Save & Submit' : 'Next'}
                 </button>
               </div>
@@ -924,7 +873,6 @@ const ExamPage = () => {
             <p className="exam-flow-note">Answers lock when you continue. Questions advance automatically when their time expires.</p>
           </section>
 
-<<<<<<< HEAD
           <div className="exam-side">
           <div className="card exam-side-actions" aria-label="Exam actions">
             <button type="button" className="btn btn-secondary btn-block" disabled={submitting} onClick={() => setReviewOpen(true)}>
@@ -936,8 +884,6 @@ const ExamPage = () => {
             </button>
           </div>
 
-=======
->>>>>>> origin/main
           <div className="card nav-panel exam-proctor-panel">
             <h4>Proctoring Monitor</h4>
 
@@ -977,14 +923,11 @@ const ExamPage = () => {
                 {camera.ready ? '✓ Camera Active' : '⏳ Connecting…'}
               </span>
             )}
-<<<<<<< HEAD
             {examSettings.faceDetectionEnabled && camera.ready && face.lowLight && (
               <p className="sysreq-hint" role="status" style={{ marginTop: '-4px', marginBottom: '12px' }}>
                 💡 Low light — face your screen towards a light or turn on a lamp so your face stays clearly visible.
               </p>
             )}
-=======
->>>>>>> origin/main
 
             <div className="exam-mic-status">
               <div className="sysreq-check-title" style={{ fontSize: '12.5px', marginBottom: '6px' }}>
@@ -1006,7 +949,6 @@ const ExamPage = () => {
                       );
                     })}
                   </div>
-<<<<<<< HEAD
                   {(() => {
                     const noSignal = examSettings.microphoneRequired && micReady && microphone.activity === 'no-signal';
                     return (
@@ -1021,11 +963,6 @@ const ExamPage = () => {
                       </span>
                     );
                   })()}
-=======
-                  <span className={`status-badge ${!examSettings.microphoneRequired ? 'success' : micReady ? 'success' : 'pending'}`}>
-                        {!examSettings.microphoneRequired ? '— Not Required' : !micReady ? '⏳ Connecting…' : microphone.muted ? '✓ Active (no sound)' : '✓ Active'}
-                  </span>
->>>>>>> origin/main
                 </>
               )}
             </div>
@@ -1033,11 +970,7 @@ const ExamPage = () => {
             {(() => {
               const issues = [];
               if (examSettings.cameraRequired && !camera.ready) issues.push('camera');
-<<<<<<< HEAD
               if (examSettings.microphoneRequired && (!micReady || microphone.activity === 'no-signal')) issues.push('microphone');
-=======
-              if (examSettings.microphoneRequired && !micReady) issues.push('microphone');
->>>>>>> origin/main
               if (settingsLoaded && examSettings.fullscreenRequired && fullscreenExited) issues.push('fullscreen');
               if (!isOnline) issues.push('network');
               const allGood = issues.length === 0;
@@ -1050,10 +983,7 @@ const ExamPage = () => {
 
             <div className="secure-note">🔒 <span>Secure Examination Mode is active. Camera and microphone are being monitored for the entire duration of the exam.</span></div>
           </div>
-<<<<<<< HEAD
           </div>
-=======
->>>>>>> origin/main
         </div>
       </main>
 
@@ -1140,11 +1070,7 @@ const ExamPage = () => {
             <div className="modal-actions">
               <button type="button" className="btn btn-secondary" onClick={() => setReviewOpen(false)}>Continue Exam</button>
               <button type="button" className="btn btn-success" disabled={isAdvancing || submitting || !isOnline}
-<<<<<<< HEAD
                 onClick={() => { setSubmitError(''); setReviewOpen(false); setSubmitConfirmOpen(true); }}>Submit the Exam</button>
-=======
-                onClick={() => { setSubmitError(''); setReviewOpen(false); setSubmitConfirmOpen(true); }}>Submit</button>
->>>>>>> origin/main
             </div>
           </div>
         </div>
@@ -1170,7 +1096,6 @@ const ExamPage = () => {
         </div>
       )}
 
-<<<<<<< HEAD
       {noAnswerConfirmOpen && (
         <div className="overlay" role="alertdialog" aria-modal="true" aria-labelledby="no-answer-title">
           <div className="modal-card" style={{ textAlign: 'center' }}>
@@ -1190,8 +1115,6 @@ const ExamPage = () => {
         </div>
       )}
 
-=======
->>>>>>> origin/main
       <Footer secureMode />
     </>
   );

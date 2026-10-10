@@ -228,12 +228,8 @@ try {
   const normal = await page('normal'); await enterExam(normal);
   assert.equal(await normal.evaluate('document.querySelector("#active-question").textContent'), questions[0].questionText);
   assert.equal(await normal.evaluate('Array.from(document.querySelectorAll("button")).some(button => /Previous|Bookmark|Mark (as|for) review/i.test(button.textContent))'), false);
-<<<<<<< HEAD
   assert.equal(await normal.evaluate('Array.from(document.querySelectorAll(".exam-side-actions button")).map(button => button.textContent.trim()).join(",")'), 'Review the Exam,Submit the Exam');
   assert.equal(await normal.evaluate('document.querySelector(".exam-side-actions").getBoundingClientRect().bottom <= document.querySelector(".exam-proctor-panel").getBoundingClientRect().top'), true, 'Review/Submit sit above the proctoring monitor');
-=======
-  assert.equal(await normal.evaluate('Array.from(document.querySelectorAll(".exam-actions-row button")).map(button => button.textContent.trim()).filter(text => text === "Review" || text === "Submit").join(",")'), 'Review,Submit');
->>>>>>> origin/main
   assert.equal(await normal.evaluate('[".subject-summary-name", ".subject-summary-count"].map(sel => document.querySelector(".subject-summary-card " + sel).textContent.trim()).join(" ")'), 'Mathematics 0 / 3 Answered');
   await normal.evaluate('document.querySelectorAll("input[type=radio]")[1].click()');
   await normal.wait('document.body.innerText.includes("Answer saved.")', 'answer draft save');
@@ -318,7 +314,6 @@ try {
   console.log('PASS: camera, check-in photo and fullscreen required; fullscreen recovery after refresh; submission.');
 
   const early = await page('early', true); await enterExam(early);
-<<<<<<< HEAD
   // Next with no answer asks first; "Go Back" stays on the same question.
   await early.click('Next');
   await early.wait('document.body.innerText.includes("No answer is selected. Do you want to continue?")', 'no-answer warning');
@@ -326,8 +321,6 @@ try {
   await early.wait('!document.body.innerText.includes("No answer is selected")', 'warning closed');
   assert.equal(await early.evaluate('document.querySelector("#active-question").textContent'), questions[0].questionText, 'Go Back keeps the question');
   assert.equal(fixture('early').position, 0, 'nothing was locked or advanced');
-=======
->>>>>>> origin/main
   await early.evaluate('document.querySelectorAll("input[type=radio]")[2].click()');
   await early.wait('document.body.innerText.includes("Answer saved.")', 'early draft save');
   await early.click('Submit'); await early.wait('document.body.innerText.includes("Submit Examination?")', 'submit confirmation');
@@ -353,7 +346,6 @@ try {
   await violations.click('I Understand');
   assert.equal(fixture('violations').violations, 3, 'every violation is recorded');
   assert.equal(await violations.evaluate('!!document.querySelector("#active-question") && !document.body.innerText.includes("Examination Blocked")'), true, 'the exam continues after any number of violations');
-<<<<<<< HEAD
   // Next with no answer -> "Continue" moves on, leaving the question unanswered.
   await violations.click('Next');
   await violations.wait('document.body.innerText.includes("No answer is selected. Do you want to continue?")', 'no-answer warning');
@@ -362,8 +354,6 @@ try {
   assert.equal(fixture('violations').locked.has(questions[0].id), true);
   assert.equal(fixture('violations').answers.get(questions[0].id) ?? null, null, 'left unanswered');
   console.log('PASS: Next without an answer warns; Go Back stays, Continue moves on unanswered.');
-=======
->>>>>>> origin/main
   console.log('PASS: violations are captured with a reason popup (no N/3); the exam is never blocked.');
 
   assert.deepEqual(exceptions, [], 'browser must not throw JavaScript exceptions');

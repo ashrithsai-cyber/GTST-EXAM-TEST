@@ -123,7 +123,6 @@ class Query {
         return this;
     }
     or() { return this; }
-<<<<<<< HEAD
     // Postgres ILIKE: case-insensitive, `%` any run, `_` one char, `\` escapes.
     ilike(col, pattern) {
         const source = String(pattern).replace(/\\(.)|([%_])|([^\\%_])/g, (m, escaped, wild, plain) =>
@@ -132,9 +131,6 @@ class Query {
         this.filters.push((r) => typeof r[col] === "string" && regex.test(r[col]));
         return this;
     }
-=======
-    ilike() { return this; }
->>>>>>> origin/main
     order(col, { ascending = true } = {}) { this.sort = { col, ascending }; return this; }
     limit(n) { this.limitN = n; return this; }
     range(from, to) { this.rangeFrom = from; this.rangeTo = to; return this; }

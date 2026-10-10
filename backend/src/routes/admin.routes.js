@@ -126,7 +126,7 @@ router.get("/system-check-screenshots", listCheckInScreenshots);
 router.get("/system-check-screenshots/:id/image", getCheckInScreenshotImage);
 
 router.get("/mock-video", getMockVideo);
-router.post("/mock-video", adminUploadLimiter, upload.single("video"), uploadMockVideo);
+router.post("/mock-video", adminUploadLimiter, upload.videoUpload.single("video"), uploadMockVideo);
 router.put("/mock-video/details", updateMockVideoDetails);
 router.delete("/mock-video", deleteMockVideo);
 

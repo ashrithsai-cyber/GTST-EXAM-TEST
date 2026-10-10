@@ -38,6 +38,13 @@ function sanitizeFileName(name) {
     return cleaned.slice(-150) || "video";
 }
 
+// storage-js reports the size cap as HTTP 413 ("EntityTooLarge" /
+// "Payload too large"); statusCode is a string in some versions.
+function isStorageTooLarge(error) {
+    return Number(error?.statusCode ?? error?.status) === 413
+        || /EntityTooLarge|Payload too large|exceeded the maximum allowed size/i.test(`${error?.error ?? ""} ${error?.message ?? ""}`);
+}
+
 // mock_videos is modeled as a small history table, but the admin UI only
 // ever shows/replaces "the current video" — the single most recent row.
 async function getCurrentRow() {
@@ -135,7 +142,19 @@ const uploadMockVideo = async (req, res) => {
                 upsert: false
             });
 
-        if (uploadError) throw uploadError;
+        if (uploadError) {
+            // Supabase's own size cap (project-wide, or the bucket's
+            // file_size_limit) — the admin can act on this, so say so
+            // instead of a generic server error.
+            if (isStorageTooLarge(uploadError)) {
+                console.warn(`uploadMockVideo: Supabase Storage rejected ${req.file.size} bytes as too large`);
+                return res.status(413).json({
+                    success: false,
+                    message: "Supabase Storage rejected this video as too large for the project's upload limit. Compress the video (for example 720p H.264 MP4) or raise the Supabase project's upload size limit, then try again."
+                });
+            }
+            throw uploadError;
+        }
 
         const { data, error } = await supabase
             .from("mock_videos")

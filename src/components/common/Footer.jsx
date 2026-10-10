@@ -1,7 +1,6 @@
 import React, { useContext } from "react";
 import { BrandingContext } from "../../context/BrandingContext";
 
-<<<<<<< HEAD
 // Same official portal SuccessPage redirects to.
 const OFFICIAL_SITE_URL = "https://www.givelaurelsfoundation.com/";
 const OFFICIAL_SITE_LABEL = "www.givelaurelsfoundation.com";
@@ -16,33 +15,12 @@ const CONTACT_NUMBERS = [
 // `secureMode` is set on the live exam screen: the site and phone numbers
 // are shown as plain text there, because opening a link mid-exam switches
 // tabs / apps and would be recorded as a proctoring violation.
-=======
-// Same official portal SuccessPage redirects to. No phone number or email
-// is recorded anywhere in this project, so none is shown here.
-const OFFICIAL_SITE_URL = "https://www.givelaurelsfoundation.com/";
-const OFFICIAL_SITE_LABEL = "www.givelaurelsfoundation.com";
-
-// `secureMode` is set on the live exam screen: the site is shown as plain
-// text there, because opening a link mid-exam switches tabs and would be
-// recorded as a proctoring violation.
->>>>>>> origin/main
 const Footer = ({ secureMode = false }) => {
   const { examName } = useContext(BrandingContext);
   return (
     <footer className="site-footer">
-<<<<<<< HEAD
       <div className="footer-bar">
         <span className="footer-site">
-=======
-      <div className="footer-help" aria-label="Help and contact">
-        <strong>Need help?</strong>
-        <span>
-          For any issue with your details, login or examination, contact your
-          exam coordinator or the exam administrator.
-        </span>
-        <span>
-          Official website:{" "}
->>>>>>> origin/main
           {secureMode ? (
             <span className="footer-help-site">{OFFICIAL_SITE_LABEL}</span>
           ) : (
@@ -51,7 +29,6 @@ const Footer = ({ secureMode = false }) => {
             </a>
           )}
         </span>
-<<<<<<< HEAD
         <div className="footer-help" aria-label="Help and contact">
           <span className="footer-help-label">
             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -75,11 +52,6 @@ const Footer = ({ secureMode = false }) => {
         <span className="footer-copy">
           © {new Date().getFullYear()} · {examName}
         </span>
-=======
-      </div>
-      <div className="footer-copy">
-        © {new Date().getFullYear()} · {examName}
->>>>>>> origin/main
       </div>
     </footer>
   );

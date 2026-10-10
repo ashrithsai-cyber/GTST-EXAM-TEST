@@ -120,10 +120,7 @@ function loadImageFromBlob(blob) {
 }
 
 const NO_FACE_GRACE_MS = 1200;
-<<<<<<< HEAD
 const MULTIPLE_FACE_REPEAT_MS = 3000;
-=======
->>>>>>> origin/main
 const MIC_METER_BARS = 24;
 
 const StatusBadge = ({ state, passText = "Passed", failText = "Failed" }) => {
@@ -258,21 +255,10 @@ const SystemCheckPage = () => {
     setFaceCount(face.faceCount);
   }, [face.faceCount, setFaceCount]);
 
-<<<<<<< HEAD
   // face.faceState is smoothed over several frames (utils/faceTracker.js),
   // so a single flickering frame never changes it.
   const faceCheckActive = camera.ready && !face.modelLoading && !face.modelError;
   const faceState = faceCheckActive ? face.faceState : "checking";
-=======
-  const faceCheckActive = camera.ready && !face.modelLoading && !face.modelError;
-  const faceState = !faceCheckActive
-    ? "checking"
-    : face.faceCount === 1
-      ? "single"
-      : face.faceCount === 0
-        ? "none"
-        : "multiple";
->>>>>>> origin/main
 
   useEffect(() => {
     if (noFaceTimerRef.current) {
@@ -298,7 +284,6 @@ const SystemCheckPage = () => {
     return undefined;
   }, [faceState]);
 
-<<<<<<< HEAD
   // Closing the multiple-face warning doesn't silence it: if someone else
   // is still in frame a moment later, it is shown again.
   useEffect(() => {
@@ -307,8 +292,6 @@ const SystemCheckPage = () => {
     return () => clearTimeout(timer);
   }, [popupDismissed, popupError]);
 
-=======
->>>>>>> origin/main
   const faceReady = faceState === "single";
   const micReady = microphone.ready && microphone.inputDetected;
 
@@ -656,13 +639,9 @@ const SystemCheckPage = () => {
                   ? face.modelError
                     : faceState === "checking"
                       ? "Starting face detection…"
-<<<<<<< HEAD
                       : face.lowLight
                         ? "Low light — face a window or turn on a lamp so your face is clearly visible. Exactly one face must be visible at all times."
                         : "Exactly one face must be visible at all times."}
-=======
-                      : "Exactly one face must be visible at all times."}
->>>>>>> origin/main
                   {face.modelError && !faceBlockedByCamera && (
                     <>
                       {" "}
@@ -722,7 +701,6 @@ const SystemCheckPage = () => {
                 </p>
               ) : microphone.loading ? (
                 <p className="sysreq-hint">Waiting for microphone permission…</p>
-<<<<<<< HEAD
               ) : microphone.ready && microphone.activity === "no-signal" ? (
                 <div>
                   <p className="sysreq-hint" style={{ color: "var(--danger)" }}>
@@ -738,12 +716,6 @@ const SystemCheckPage = () => {
                   <p className="sysreq-hint" style={{ color: "var(--danger)" }}>
                     No sound detected yet. Speak normally — even a soft voice is enough. If the bars still don&apos;t
                     move, check your microphone settings.
-=======
-              ) : microphone.muted || !microphone.ready ? (
-                <div>
-                  <p className="sysreq-hint" style={{ color: "var(--danger)" }}>
-                    No sound detected yet. Check your device's mute switch and microphone settings, then speak normally.
->>>>>>> origin/main
                   </p>
                   <button className="btn btn-primary btn-sm" style={{ marginTop: "10px" }} onClick={microphone.retry}>
                     Retry Microphone Access
