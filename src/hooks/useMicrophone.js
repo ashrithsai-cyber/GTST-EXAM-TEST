@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+<<<<<<< HEAD
 import { createAudioActivityAnalyzer } from '../utils/audioActivity.js';
 
 const MUTE_GRACE_MS = 2500;
@@ -12,6 +13,13 @@ export const AUDIO_CONSTRAINTS = {
   autoGainControl: true,
   channelCount: 1,
 };
+=======
+
+const MUTE_GRACE_MS = 2500;
+const UPDATE_INTERVAL_MS = 80;
+const INPUT_CONFIRM_MS = 240;
+const MIN_AUDIBLE_RMS = 0.01;
+>>>>>>> origin/main
 
 const INITIAL_STATE = {
   ready: false,
@@ -21,8 +29,11 @@ const INITIAL_STATE = {
   error: '',
   inputDetected: false,
   needsActivation: false,
+<<<<<<< HEAD
   // 'silence' | 'speech' | 'noise' | 'no-signal' — see utils/audioActivity.js
   activity: 'silence',
+=======
+>>>>>>> origin/main
 };
 
 export function describeMicrophoneError(error) {
@@ -58,12 +69,19 @@ export function createMicrophoneMonitor(onUpdate, browser = globalThis) {
   let source = null;
   let analyser = null;
   let frame = null;
+<<<<<<< HEAD
   let samples = null;
   let bytes = null;
   let spectrum = null;
   let analyzer = createAudioActivityAnalyzer();
   let lastUpdate = 0;
   let lastAudible = 0;
+=======
+  let data = null;
+  let lastUpdate = 0;
+  let lastAudible = 0;
+  let audibleSince = null;
+>>>>>>> origin/main
   let inputDetected = false;
   const listeners = [];
 
@@ -97,15 +115,24 @@ export function createMicrophoneMonitor(onUpdate, browser = globalThis) {
     const running = audioContext.state === 'running';
     const live = track.readyState === 'live' && track.enabled && !track.muted;
     if (!running || !live) {
+<<<<<<< HEAD
       // Earlier sound must not count as proof after the device comes back.
       inputDetected = false;
       analyzer = createAudioActivityAnalyzer();
+=======
+      inputDetected = false;
+      audibleSince = null;
+>>>>>>> origin/main
     }
     emit({
       ready: running && live,
       needsActivation: !running && audioContext.state !== 'closed',
       inputDetected,
+<<<<<<< HEAD
       ...(!running || !live ? { level: 0, activity: 'silence' } : {}),
+=======
+      ...(!running || !live ? { level: 0 } : {}),
+>>>>>>> origin/main
     });
   };
 
@@ -131,6 +158,7 @@ export function createMicrophoneMonitor(onUpdate, browser = globalThis) {
     if (now - lastUpdate >= UPDATE_INTERVAL_MS) {
       lastUpdate = now;
       if (audioContext.state === 'running' && track.enabled && !track.muted) {
+<<<<<<< HEAD
         let hasSpectrum = false;
         try {
           // Float samples keep quiet speech that 8-bit samples round to zero.
@@ -144,10 +172,15 @@ export function createMicrophoneMonitor(onUpdate, browser = globalThis) {
             analyser.getFloatFrequencyData(spectrum);
             hasSpectrum = true;
           }
+=======
+        try {
+          analyser.getByteTimeDomainData(data);
+>>>>>>> origin/main
         } catch {
           fail('The browser could not read microphone audio. Please click Retry Microphone Access.');
           return;
         }
+<<<<<<< HEAD
         const reading = analyzer.update(now, samples, hasSpectrum ? spectrum : null, audioContext.sampleRate);
         if (reading.active) lastAudible = now;
         if (reading.inputConfirmed) inputDetected = true;
@@ -155,6 +188,23 @@ export function createMicrophoneMonitor(onUpdate, browser = globalThis) {
           ready: true, level: reading.level, activity: reading.activity, inputDetected,
           muted: now - lastAudible >= MUTE_GRACE_MS, needsActivation: false, error: '',
         });
+=======
+        let sumSquares = 0;
+        for (const sample of data) {
+          const amplitude = (sample - 128) / 128;
+          sumSquares += amplitude * amplitude;
+        }
+        const rms = Math.sqrt(sumSquares / data.length);
+        const level = rms > 0 ? Math.max(0, Math.min(100, Math.round((20 * Math.log10(rms) + 60) / 60 * 100))) : 0;
+        if (rms >= MIN_AUDIBLE_RMS) {
+          lastAudible = now;
+          if (audibleSince === null) audibleSince = now;
+          if (now - audibleSince >= INPUT_CONFIRM_MS) inputDetected = true;
+        } else {
+          audibleSince = null;
+        }
+        emit({ ready: true, level, inputDetected, muted: now - lastAudible >= MUTE_GRACE_MS, needsActivation: false, error: '' });
+>>>>>>> origin/main
       } else {
         syncAvailability();
       }
@@ -176,7 +226,11 @@ export function createMicrophoneMonitor(onUpdate, browser = globalThis) {
       return;
     }
     try {
+<<<<<<< HEAD
       stream = await browser.navigator.mediaDevices.getUserMedia({ audio: AUDIO_CONSTRAINTS });
+=======
+      stream = await browser.navigator.mediaDevices.getUserMedia({ audio: true });
+>>>>>>> origin/main
       if (stopped) {
         stream.getTracks().forEach((mediaTrack) => mediaTrack.stop());
         return;
@@ -189,12 +243,18 @@ export function createMicrophoneMonitor(onUpdate, browser = globalThis) {
       audioContext = new AudioContextClass();
       source = audioContext.createMediaStreamSource(stream);
       analyser = audioContext.createAnalyser();
+<<<<<<< HEAD
       analyser.fftSize = 2048;
       analyser.smoothingTimeConstant = 0.5;
       source.connect(analyser); // Never connect the microphone to speakers.
       samples = new Float32Array(analyser.fftSize);
       bytes = new Uint8Array(analyser.fftSize);
       spectrum = new Float32Array(analyser.fftSize / 2);
+=======
+      analyser.fftSize = 1024;
+      source.connect(analyser); // Never connect the microphone to speakers.
+      data = new Uint8Array(analyser.fftSize);
+>>>>>>> origin/main
       lastAudible = browser.performance.now();
       listen(track, 'ended', () => fail('Your microphone was disconnected. Reconnect it and click Retry Microphone Access.'));
       listen(track, 'mute', syncAvailability);

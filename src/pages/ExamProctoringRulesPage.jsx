@@ -25,6 +25,7 @@ const FALLBACK_RULES = [
   "Violation of any of the above rules may lead to disqualification and cancellation of your candidature.",
 ];
 
+<<<<<<< HEAD
 // Seconds -> "m:ss" (or "h:mm:ss"); "--:--" until the length is known.
 const formatVideoTime = (seconds) => {
   if (!Number.isFinite(seconds) || seconds < 0) return "--:--";
@@ -35,6 +36,8 @@ const formatVideoTime = (seconds) => {
   return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
 };
 
+=======
+>>>>>>> origin/main
 const ExamProctoringRulesPage = () => {
   const navigate = useNavigate();
   usePreventBackNavigation();
@@ -47,9 +50,12 @@ const ExamProctoringRulesPage = () => {
   const [videoLoading, setVideoLoading] = useState(true);
   const [videoError, setVideoError] = useState(false);
   const [videoCompleted, setVideoCompleted] = useState(false);
+<<<<<<< HEAD
   const [videoTime, setVideoTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
   const [needsPlayClick, setNeedsPlayClick] = useState(false);
+=======
+>>>>>>> origin/main
   const maxWatchedTimeRef = useRef(0);
 
   // The rules students must acknowledge — admin-managed (Admin >
@@ -135,6 +141,7 @@ const ExamProctoringRulesPage = () => {
     document.documentElement.requestFullscreen?.().catch(() => {});
   };
 
+<<<<<<< HEAD
   // Plays with sound. Browsers may refuse unmuted autoplay when the page
   // has had no user interaction yet (e.g. after a reload) — then a
   // "Play with sound" button is shown and the student's click starts it.
@@ -156,6 +163,11 @@ const ExamProctoringRulesPage = () => {
       maxWatchedTimeRef.current = Math.max(maxWatchedTimeRef.current, video.currentTime);
     }
     setVideoTime(video.currentTime);
+=======
+  const handleVideoTimeUpdate = (event) => {
+    const video = event.currentTarget;
+    maxWatchedTimeRef.current = Math.max(maxWatchedTimeRef.current, video.currentTime);
+>>>>>>> origin/main
   };
 
   const handleVideoSeeking = (event) => {
@@ -165,6 +177,7 @@ const ExamProctoringRulesPage = () => {
     }
   };
 
+<<<<<<< HEAD
   // Fast-forwarding via playback speed counts as skipping too.
   const handleVideoRateChange = (event) => {
     const video = event.currentTarget;
@@ -182,6 +195,9 @@ const ExamProctoringRulesPage = () => {
     }
     maxWatchedTimeRef.current = video.duration;
     setVideoTime(video.duration);
+=======
+  const handleVideoEnded = () => {
+>>>>>>> origin/main
     setVideoCompleted(true);
   };
 
@@ -223,11 +239,16 @@ const ExamProctoringRulesPage = () => {
       <Header />
       <div className="tricolor"></div>
       <div className="page-wrap">
+<<<<<<< HEAD
         <div className={`page-head ${videoSrc || videoLoading || videoError ? "rules-page-head" : ""}`}>
+=======
+        <div className="page-head">
+>>>>>>> origin/main
           <h1>Exam Proctoring &amp; Rules</h1>
           <p>Review the rules carefully and confirm before you continue.</p>
         </div>
 
+<<<<<<< HEAD
         {/* Video on the left, rules on the right; stacked (video first) on
             narrow screens. Without any video the rules use the full width. */}
         <div className={`rules-layout ${videoSrc || videoLoading || videoError ? "" : "rules-layout-single"}`}>
@@ -235,6 +256,11 @@ const ExamProctoringRulesPage = () => {
           <div className="rules-video-col">
           {videoSrc && (
             <div className="card sysreq-card">
+=======
+        <div style={{ maxWidth: "820px", margin: "0 auto" }}>
+          {videoSrc && (
+            <div className="card sysreq-card" style={{ marginBottom: "18px" }}>
+>>>>>>> origin/main
               <h2 style={{ marginBottom: "4px" }}>Exam Process Video</h2>
               <p className="sysreq-hint" style={{ marginBottom: "12px" }}>
                 Watch the video provided by the administrator before continuing.
@@ -243,12 +269,18 @@ const ExamProctoringRulesPage = () => {
                 <video
                   ref={videoRef}
                   src={videoSrc}
+<<<<<<< HEAD
+=======
+                  autoPlay
+                  muted
+>>>>>>> origin/main
                   playsInline
                   preload="metadata"
                   className="proctoring-video"
                   controls={false}
                   controlsList="nodownload noplaybackrate nofullscreen"
                   disablePictureInPicture
+<<<<<<< HEAD
                   onLoadedMetadata={(event) => setVideoDuration(event.currentTarget.duration)}
                   onDurationChange={(event) => setVideoDuration(event.currentTarget.duration)}
                   onTimeUpdate={handleVideoTimeUpdate}
@@ -297,16 +329,33 @@ const ExamProctoringRulesPage = () => {
                       ? `${formatVideoTime(videoDuration - videoTime)} remaining · Skipping ahead is disabled`
                       : "Skipping ahead is disabled"}
                 </span>
+=======
+                  onTimeUpdate={handleVideoTimeUpdate}
+                  onSeeking={handleVideoSeeking}
+                  onPause={(event) => {
+                    if (!event.currentTarget.ended) event.currentTarget.play().catch(() => {});
+                  }}
+                  onLoadedData={(event) => event.currentTarget.play().catch(() => {})}
+                  onEnded={handleVideoEnded}
+                  onError={() => setVideoError(true)}
+                />
+>>>>>>> origin/main
               </div>
             </div>
           )}
           {videoLoading && <p className="sysreq-hint">Loading administrator video…</p>}
           {!videoLoading && videoError && (
+<<<<<<< HEAD
             <p className="error-state">The instruction video could not be loaded. Please read the rules carefully before continuing.</p>
           )}
           </div>
           )}
           <div className="card sysreq-card rules-text-col">
+=======
+            <p className="error-state">The instruction video could not be loaded. Please read the rules below carefully before continuing.</p>
+          )}
+          <div className="card sysreq-card">
+>>>>>>> origin/main
             <h2 style={{ marginBottom: "4px" }}>Rules &amp; Regulations</h2>
             <p className="sysreq-hint" style={{ marginBottom: "4px" }}>
               Please read all the rules carefully before proceeding.
@@ -325,7 +374,11 @@ const ExamProctoringRulesPage = () => {
             )}
           </div>
 
+<<<<<<< HEAD
           <div className="rules-actions">
+=======
+          <div style={{ marginTop: "18px" }}>
+>>>>>>> origin/main
             <button
               className="btn btn-success btn-block btn-lg"
               disabled={!canContinue || continuePending}

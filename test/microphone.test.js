@@ -1,8 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+<<<<<<< HEAD
 import { createMicrophoneMonitor, describeMicrophoneError, AUDIO_CONSTRAINTS } from '../src/hooks/useMicrophone.js';
 
 function createBrowser({ contextState = 'running', resumeBlocked = false, permissionError, permissionPromise, noAudioTrack = false, byteOnly = false } = {}) {
+=======
+import { createMicrophoneMonitor, describeMicrophoneError } from '../src/hooks/useMicrophone.js';
+
+function createBrowser({ contextState = 'running', resumeBlocked = false, permissionError, permissionPromise, noAudioTrack = false } = {}) {
+>>>>>>> origin/main
   let now = 0;
   let amplitude = 0;
   let state = {};
@@ -15,6 +21,7 @@ function createBrowser({ contextState = 'running', resumeBlocked = false, permis
   });
   const stream = { getTracks: () => [track], getAudioTracks: () => noAudioTrack ? [] : [track] };
   const source = { disconnected: false, connections: [], connect(target) { this.connections.push(target); }, disconnect() { this.disconnected = true; } };
+<<<<<<< HEAD
   // amplitude is in 8-bit units (128 = full scale) so byte and float reads agree.
   const analyser = { disconnected: false, fftSize: 0, getByteTimeDomainData(data) {
     for (let index = 0; index < data.length; index += 1) data[index] = 128 + Math.round(index % 2 ? amplitude : -amplitude);
@@ -27,6 +34,13 @@ function createBrowser({ contextState = 'running', resumeBlocked = false, permis
   }
   class AudioContext extends EventTarget {
     constructor() { super(); this.state = contextState; this.resumeBlocked = resumeBlocked; this.sampleRate = 48000; context = this; }
+=======
+  const analyser = { disconnected: false, fftSize: 0, getByteTimeDomainData(data) {
+    for (let index = 0; index < data.length; index += 1) data[index] = 128 + (index % 2 ? amplitude : -amplitude);
+  }, disconnect() { this.disconnected = true; } };
+  class AudioContext extends EventTarget {
+    constructor() { super(); this.state = contextState; this.resumeBlocked = resumeBlocked; context = this; }
+>>>>>>> origin/main
     createMediaStreamSource() { return source; }
     createAnalyser() { return analyser; }
     resume() {
@@ -40,7 +54,11 @@ function createBrowser({ contextState = 'running', resumeBlocked = false, permis
   const browser = {
     isSecureContext: true,
     navigator: { mediaDevices: { async getUserMedia(constraints) {
+<<<<<<< HEAD
       assert.deepEqual(constraints, { audio: AUDIO_CONSTRAINTS });
+=======
+      assert.deepEqual(constraints, { audio: true });
+>>>>>>> origin/main
       if (permissionError) throw Object.assign(new Error(permissionError), { name: permissionError });
       return permissionPromise || stream;
     } } },
@@ -192,6 +210,7 @@ test('unsupported media access describes insecure context without claiming permi
   assert.match(env.state.error, /secure connection/);
   assert.equal(env.state.loading, false);
 });
+<<<<<<< HEAD
 
 test('quiet speech below 8-bit resolution passes through float samples', async () => {
   const env = createBrowser();
@@ -222,3 +241,5 @@ test('a microphone delivering only digital zeros is reported as no signal, not s
   assert.equal(env.state.ready, true, 'device still open — only the signal is missing');
   env.monitor.stop();
 });
+=======
+>>>>>>> origin/main

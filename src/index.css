@@ -165,7 +165,13 @@ a {
 .site-footer {
   background: var(--navy-2);
   color: #9fb0d6;
+<<<<<<< HEAD
   padding: 12px 0;
   font-size: 12.5px;
+=======
+  padding: 22px 0;
+  font-size: 12.5px;
+  text-align: center;
+>>>>>>> origin/main
   margin-top: auto;
 }

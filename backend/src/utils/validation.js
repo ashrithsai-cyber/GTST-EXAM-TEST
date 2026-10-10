@@ -22,6 +22,7 @@ function sanitizeSearchTerm(value) {
     return value.replace(/[,()*%\\]/g, " ").trim().slice(0, 100);
 }
 
+<<<<<<< HEAD
 // Student login identifiers (Registration ID, Hall Ticket Number) as typed:
 // all whitespace removed (stored values never contain any), then only
 // letters, digits, "/" and "-" are accepted. The result is matched with a
@@ -39,4 +40,10 @@ module.exports = {
     isNonEmptyString,
     sanitizeSearchTerm,
     normalizeLoginId
+=======
+module.exports = {
+    isUuid,
+    isNonEmptyString,
+    sanitizeSearchTerm
+>>>>>>> origin/main
 };

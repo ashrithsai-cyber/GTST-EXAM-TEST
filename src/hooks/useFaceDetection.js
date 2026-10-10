@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+<<<<<<< HEAD
 import { countFaces, createFaceStabilizer } from '../utils/faceTracker.js';
+=======
+>>>>>>> origin/main
 
 // Face-detection assets are tried from our own origin first — the WASM
 // runtime is copied out of the pinned @mediapipe/tasks-vision package into
@@ -23,6 +26,7 @@ const ASSET_SOURCES = [
 // "Loading face detection…".
 const LOAD_TIMEOUT_MS = 20000;
 const DETECT_INTERVAL_MS = 300;
+<<<<<<< HEAD
 // Mean frame brightness (0-255). Below LOW_LIGHT the frame is brightened
 // before detection; LOW_LIGHT also makes "no face" wait longer.
 const LOW_LIGHT_LUMA = 70;
@@ -52,6 +56,8 @@ function brightenedFrame(video, canvas, luma) {
   ctx.filter = 'none';
   return canvas;
 }
+=======
+>>>>>>> origin/main
 
 function withTimeout(promise, ms) {
   let timer;
@@ -74,9 +80,13 @@ async function createDetector() {
         return FaceDetector.createFromOptions(vision, {
           baseOptions: { modelAssetPath: source.model, delegate: 'CPU' },
           runningMode: 'VIDEO',
+<<<<<<< HEAD
           // Permissive here so a face in poor light is still found;
           // utils/faceTracker.js applies the stricter per-face rules.
           minDetectionConfidence: 0.5,
+=======
+          minDetectionConfidence: 0.65,
+>>>>>>> origin/main
         });
       })(), LOAD_TIMEOUT_MS);
     } catch (error) {
@@ -86,6 +96,7 @@ async function createDetector() {
   throw lastError || new Error('Face detection unavailable');
 }
 
+<<<<<<< HEAD
 // faceCount / faceState are the *stable* reading (see utils/faceTracker.js):
 // faceState is 'checking' | 'single' | 'none' | 'multiple'. lowLight tells
 // the student their picture is too dark for reliable detection.
@@ -93,6 +104,10 @@ export function useFaceDetection(videoRef, active) {
   const [faceCount, setFaceCount] = useState(0);
   const [faceState, setFaceState] = useState('checking');
   const [lowLight, setLowLight] = useState(false);
+=======
+export function useFaceDetection(videoRef, active) {
+  const [faceCount, setFaceCount] = useState(0);
+>>>>>>> origin/main
   const [modelLoading, setModelLoading] = useState(true);
   const [modelError, setModelError] = useState('');
   const [attempt, setAttempt] = useState(0);
@@ -108,6 +123,7 @@ export function useFaceDetection(videoRef, active) {
     if (!active) return undefined;
 
     let cancelled = false;
+<<<<<<< HEAD
     const stabilizer = createFaceStabilizer();
     const probe = Object.assign(document.createElement('canvas'), { width: 32, height: 24 });
     const enhanced = document.createElement('canvas');
@@ -134,11 +150,14 @@ export function useFaceDetection(videoRef, active) {
         return { count: null, lowLight: dim };
       }
     };
+=======
+>>>>>>> origin/main
 
     const loop = (now) => {
       const video = videoRef.current;
       const detector = detectorRef.current;
 
+<<<<<<< HEAD
       if (video && detector && now - lastDetectTimeRef.current >= DETECT_INTERVAL_MS) {
         lastDetectTimeRef.current = now;
         const { count, lowLight: dim } = sample(video, detector, now);
@@ -146,6 +165,16 @@ export function useFaceDetection(videoRef, active) {
         setFaceState(stable.state);
         setFaceCount(stable.count);
         if (dim !== undefined) setLowLight(dim);
+=======
+      if (video && detector && video.readyState >= 2 && now - lastDetectTimeRef.current >= DETECT_INTERVAL_MS) {
+        lastDetectTimeRef.current = now;
+        try {
+          const result = detector.detectForVideo(video, now);
+          setFaceCount(result.detections.length);
+        } catch {
+          // Skip this frame; the detector can transiently reject a timestamp.
+        }
+>>>>>>> origin/main
       }
 
       rafRef.current = requestAnimationFrame(loop);
@@ -181,10 +210,17 @@ export function useFaceDetection(videoRef, active) {
         detectorRef.current = null;
       }
       setFaceCount(0);
+<<<<<<< HEAD
       setFaceState('checking');
       setLowLight(false);
     };
   }, [active, videoRef, attempt]);
 
   return { faceCount, faceState, lowLight, modelLoading, modelError, retry };
+=======
+    };
+  }, [active, videoRef, attempt]);
+
+  return { faceCount, modelLoading, modelError, retry };
+>>>>>>> origin/main
 }

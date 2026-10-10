@@ -1,7 +1,11 @@
 const registrationSupabase = require("../config/registrationSupabase");
 const examSupabase = require("../config/examSupabase");
 const { getActiveExam, getExamDate, recordPresence, getFinishedActiveAttempt } = require("./_examShared");
+<<<<<<< HEAD
 const { isNonEmptyString, normalizeLoginId } = require("../utils/validation");
+=======
+const { isNonEmptyString } = require("../utils/validation");
+>>>>>>> origin/main
 const {
     readStudentToken, issueStudentToken, acquireStudentSession,
     touchStudentSession, sessionRpc, SESSION_ACTIVE_BODY, SESSION_EXPIRED_BODY
@@ -53,6 +57,7 @@ const login = async (req, res) => {
         // ========================================
         // 2. FIND STUDENT RECORD MATCHING BOTH FIELDS
         // ========================================
+<<<<<<< HEAD
         //
         // Case-insensitive in the database (ILIKE on both columns of the
         // same row), so "gtst26100094" finds "GTST26100094". The input is
@@ -73,6 +78,11 @@ const login = async (req, res) => {
 
         const {
             data: matches,
+=======
+
+        const {
+            data: student,
+>>>>>>> origin/main
             error: studentError
         } = await registrationSupabase
 
@@ -87,6 +97,7 @@ const login = async (req, res) => {
                 payment_status
             `)
 
+<<<<<<< HEAD
             .ilike(
                 "registration_id",
                 regIdInput
@@ -111,6 +122,19 @@ const login = async (req, res) => {
         }
 
         const student = matches?.[0] ?? null;
+=======
+            .eq(
+                "registration_id",
+                registrationId.trim()
+            )
+
+            .eq(
+                "hall_ticket_number",
+                hallTicketNumber.trim()
+            )
+
+            .maybeSingle();
+>>>>>>> origin/main
 
 
         if (studentError) {

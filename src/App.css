@@ -651,12 +651,15 @@
   color: var(--danger);
   border: 2px solid #f0bdb6;
 }
+<<<<<<< HEAD
 .icon-circle.warning {
   background: var(--warning-tint);
   color: var(--warning);
   border: 2px solid #f2d48a;
   font-weight: 800;
 }
+=======
+>>>>>>> origin/main
 
 .camera-preview {
   background: #1a1a2e;
@@ -823,6 +826,7 @@
   }
 }
 
+<<<<<<< HEAD
 /* Proctoring rules page: video left, rules right; stacked on narrow screens */
 .rules-layout {
   max-width: 1180px;
@@ -861,6 +865,8 @@
   }
 }
 
+=======
+>>>>>>> origin/main
 .proctoring-video-wrap {
   position: relative;
   background: #000;
@@ -934,6 +940,7 @@
   border-radius: 100px;
   transition: width 0.2s linear;
 }
+<<<<<<< HEAD
 .proctoring-video-time {
   display: flex;
   justify-content: space-between;
@@ -947,6 +954,8 @@
 .proctoring-video-time strong {
   color: var(--ink);
 }
+=======
+>>>>>>> origin/main
 
 .exam-shell {
   flex: 1;
@@ -1893,6 +1902,7 @@
   .sequential-exam .timer-badge.timer-final, .exam-final-warning { animation: none; }
 }
 
+<<<<<<< HEAD
 /* Shared footer: one compact bar — website | help + numbers (centred) | copyright */
 .footer-bar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 4px 20px; padding: 0 28px; line-height: 1.5; }  /* same side padding as .site-header */
 .footer-site { justify-self: start; font-size: 12px; }
@@ -1909,6 +1919,14 @@
   .footer-bar { grid-template-columns: auto auto; justify-content: center; text-align: center; }
   .footer-help { grid-column: 1 / -1; order: -1; }
 }
+=======
+/* Contact / help section in the shared footer */
+.footer-help { display: flex; flex-direction: column; align-items: center; gap: 4px; max-width: 720px; margin: 0 auto 12px; padding: 0 16px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.1); line-height: 1.5; }
+.footer-help strong { color: #fff; font-size: 13px; }
+.footer-help a, .footer-help-site { color: #d9e3f2; font-weight: 600; }
+.footer-help a:hover { color: #fff; }
+.footer-copy { padding: 0 16px; }
+>>>>>>> origin/main
 @media (max-width: 900px) {
   .sequential-exam .exam-body { grid-template-columns: minmax(0, 1fr); padding: 18px; }
   .subject-panel { position: static; display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
@@ -1930,6 +1948,7 @@
 .violation-card .violation-note { font-size: 12.8px; background: var(--danger-tint); color: #8b291f; border-radius: 8px; padding: 10px 12px; margin-bottom: 20px; }
 @keyframes violationIn { from { transform: scale(0.94); opacity: 0; } to { transform: none; opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .violation-card { animation: none; } }
+<<<<<<< HEAD
 
 /* Exam right column: Review / Submit above the proctoring monitor */
 .exam-side { display: flex; flex-direction: column; gap: 14px; min-width: 0; align-self: start; }
@@ -2034,3 +2053,5 @@
   .exam-final-warning { right: 94px; }
   .sequential-exam .timer-badge { font-size: 15px; }
 }
+=======
+>>>>>>> origin/main
