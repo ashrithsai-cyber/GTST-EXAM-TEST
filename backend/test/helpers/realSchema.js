@@ -29,11 +29,12 @@ function readMigration(name) {
 }
 
 // exec(sql) runs a multi-statement script on the target database.
-async function applyMigrations(exec, { from = null } = {}) {
+async function applyMigrations(exec, { from = null, through = null } = {}) {
     await exec(SUPABASE_PLATFORM_STUBS);
     const applied = [];
     for (const name of migrationFiles()) {
         if (from && name < from) continue;
+        if (through && name > through) continue;
         try {
             await exec(readMigration(name));
         } catch (error) {

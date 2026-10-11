@@ -4,8 +4,6 @@ import { AuthContext } from "../context/AuthContext";
 import { SystemCheckContext } from "../context/SystemCheckContext";
 import Header from "../components/common/Header";
 import Footer from "../components/common/Footer";
-import { useMicrophone } from "../hooks/useMicrophone";
-import { useFullscreen } from "../hooks/useFullscreen";
 import { useFaceDetection } from "../hooks/useFaceDetection";
 import { recordPresence, uploadSystemCheckScreenshot, submitSystemCheck } from "../services/examService";
 import { usePreventBackNavigation } from "../hooks/usePreventBackNavigation";
@@ -153,11 +151,9 @@ const SystemCheckPage = () => {
     completeSystemCheck,
     examSettings,
     settingsLoaded,
-    camera,
+    camera, microphone, fullscreen,
   } = useContext(SystemCheckContext);
 
-  const microphone = useMicrophone({ enabled: Boolean(student && settingsLoaded && examSettings.microphoneRequired) });
-  const fullscreen = useFullscreen();
   const face = useFaceDetection(camera.videoRef, camera.ready && examSettings.faceDetectionEnabled);
 
   const [popupError, setPopupError] = useState(null); // null | 'none' | 'multiple'

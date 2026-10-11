@@ -11,6 +11,7 @@
     "lint": "oxlint",
     "test": "node --test test/*.test.js",
     "test:browser": "node test/browser-flow.mjs",
+    "test:admin-browser": "node test/admin-live-browser.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

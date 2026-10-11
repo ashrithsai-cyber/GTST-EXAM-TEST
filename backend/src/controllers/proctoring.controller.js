@@ -37,47 +37,6 @@ const MAX_EVENT_MESSAGE_LENGTH = 500;
 
 
 // =====================================================
-// EVENTS THAT ARE WARNINGS BEFORE EXAM STARTS
-// =====================================================
-//
-// IMPORTANT:
-//
-// MULTIPLE_FACE is checked even during PRE-EXAM.
-//
-// This means:
-//     2 faces before Start Examination
-//     -> counted as a violation
-//
-// But:
-//     Fullscreen not entered
-//     -> not counted
-//
-//     Tab switch before exam
-//     -> not counted
-//
-//     Right click before exam
-//     -> not counted
-//
-// NOTE (currently unreachable): the only frontend caller of
-// POST /api/exam/proctoring/event is ExamPage.jsx's reportEvent, which is
-// never mounted/called until after startSession has already flipped the
-// session to IN_PROGRESS — see session.controller.js. So the session is
-// always IN_PROGRESS in recordEvent() in practice today, and this
-// PRE_EXAM_WARNING_EVENTS branch never actually runs. It's left in place
-// (not dead code to delete) as the intended hook for a future pre-exam
-// caller — e.g. face-detection during System Check
-// (src/pages/SystemCheckPage.jsx) reporting MULTIPLE_FACE before the
-// student even reaches Start Examination — but wiring that up is a
-// product decision (when to fire, at what threshold) that hasn't been
-// made yet, not something to add silently here.
-// =====================================================
-
-const PRE_EXAM_WARNING_EVENTS = [
-    "MULTIPLE_FACE"
-];
-
-
-// =====================================================
 // EVENTS THAT ARE WARNINGS DURING EXAM
 // =====================================================
 
@@ -127,283 +86,43 @@ const EVENT_REQUIREMENT_SETTING = {
 // =====================================================
 
 const recordEvent = async (req, res) => {
-
     try {
-
-        const {
-            sessionId,
-            eventType,
-            eventMessage
-        } = req.body;
-
-        const { candidateId } = req.student;
-
-
-        // =================================================
-        // VALIDATE REQUEST
-        // =================================================
-
-        if (
-            !isUuid(sessionId) ||
-            !eventType
-        ) {
-
-            return res.status(400).json({
-                success: false,
-                message:
-                    "Session ID and event type are required"
-            });
+        const { sessionId, eventType, eventMessage, clientEventId, occurredAt } = req.body;
+        const { candidateId, loginSessionId } = req.student;
+        if (!isUuid(sessionId) || !ALLOWED_EVENTS.includes(eventType)) {
+            return res.status(400).json({ success: false, message: "Valid session ID and event type are required" });
         }
-
-        const safeEventMessage =
-            typeof eventMessage === "string" && eventMessage.trim()
-                ? eventMessage.trim().slice(0, MAX_EVENT_MESSAGE_LENGTH)
-                : null;
-
-
-        // =================================================
-        // VALIDATE EVENT
-        // =================================================
-
-        if (
-            !ALLOWED_EVENTS.includes(
-                eventType
-            )
-        ) {
-
-            return res.status(400).json({
-                success: false,
-                message:
-                    "Invalid event type"
-            });
+        if ((clientEventId != null || occurredAt != null) &&
+            (!isUuid(clientEventId) || typeof occurredAt !== "string" || !Number.isFinite(Date.parse(occurredAt)))) {
+            return res.status(400).json({ success: false, message: "Invalid event identity or occurrence time" });
         }
-
-
-        // =================================================
-        // GET SESSION
-        //
-        // Deliberately checked (existence + ownership) BEFORE the exam
-        // settings gate below, even though a disabled-proctoring response
-        // never records anything — ownership must be verified before ANY
-        // response is returned for a sessionId, on principle: a request
-        // referencing another candidate's session should 404 regardless
-        // of feature-flag state, not just whenever proctoring happens to
-        // be enabled. (Previously this ran after the settings gate, so
-        // with proctoring disabled — as it is by default — a request
-        // could reference any other candidate's sessionId and still get
-        // back a 200; harmless in that specific state since nothing was
-        // ever written or revealed, but not something to rely on staying
-        // harmless as this function changes.)
-        // =================================================
-
-        const {
-            data: session,
-            error: sessionError
-        } = await supabase
-            .from("exam_sessions")
-            .select(
-                "id, status, proctoring_warning_count, candidate_id"
-            )
-            .eq(
-                "id",
-                sessionId
-            )
-            .maybeSingle();
-
-
-        // =================================================
-        // SESSION ERROR
-        // =================================================
-
-        if (sessionError) {
-
-            console.error(
-                "Session verification error:",
-                sessionError
-            );
-
-            return res.status(500).json({
-                success: false,
-                message:
-                    "Unable to verify exam session"
-            });
-        }
-
-
-        // =================================================
-        // SESSION NOT FOUND / NOT OWNED BY THIS STUDENT
-        // =================================================
-
-        if (!session) {
-
-            return res.status(404).json({
-                success: false,
-                message:
-                    "Exam session not found"
-            });
-        }
-
-        // Authenticated identity must own the session — one student can
-        // never file events (or trigger a block) against another's.
-        if (session.candidate_id !== candidateId) {
-            return res.status(403).json(SESSION_FORBIDDEN_BODY);
-        }
-
-
-        // =================================================
-        // EXAM SETTINGS — an admin-disabled category is not just
-        // "not a warning", it's not recorded as a proctoring event at
-        // all, so Violations/Monitoring never shows something the admin
-        // explicitly turned off as noise.
-        // =================================================
-
+        const { data: session, error } = await supabase.from("exam_sessions")
+            .select("id, candidate_id, status").eq("id", sessionId).maybeSingle();
+        if (error) throw error;
+        if (!session) return res.status(404).json({ success: false, message: "Exam session not found" });
+        if (session.candidate_id !== candidateId) return res.status(403).json(SESSION_FORBIDDEN_BODY);
         const settings = await getExamSettings();
-
-        if (!settings.proctoringEnabled) {
-            return res.json({
-                success: true,
-                message: "Proctoring is disabled for this exam; event not recorded",
-                recorded: false,
-                blocked: false
-            });
+        if (!settings.proctoringEnabled || (EVENT_REQUIREMENT_SETTING[eventType] && !settings[EVENT_REQUIREMENT_SETTING[eventType]])) {
+            return res.json({ success: true, recorded: false, blocked: false });
         }
-
-        const requiredSetting = EVENT_REQUIREMENT_SETTING[eventType];
-        if (requiredSetting && !settings[requiredSetting]) {
-            return res.json({
-                success: true,
-                message: "This check is not required for this exam; event not recorded",
-                recorded: false,
-                blocked: false
-            });
-        }
-
-
-        // =================================================
-        // ALREADY SUBMITTED
-        // =================================================
-
-        if (
-            session.status ===
-            "SUBMITTED"
-        ) {
-
-            return res.status(403).json({
-                success: false,
-                message:
-                    "Exam has already been submitted"
-            });
-        }
-
-
-        // =================================================
-        // ALREADY BLOCKED
-        // =================================================
-
-        if (
-            session.status ===
-            "BLOCKED"
-        ) {
-
-            return res.status(403).json({
-                success: false,
-                message:
-                    "Examination has already been blocked",
-                blocked: true
-            });
-        }
-
-
-        // =================================================
-        // RECORD THE VIOLATION (capture only — never blocks)
-        // =================================================
-
-        const isViolation = session.status === "IN_PROGRESS"
-            ? DURING_EXAM_WARNING_EVENTS.includes(eventType)
-            : PRE_EXAM_WARNING_EVENTS.includes(eventType);
-
-        const { data: event, error: eventError } = await supabase
-            .from("exam_events")
-            .insert([{
-                session_id: sessionId,
-                event_type: eventType,
-                event_message: safeEventMessage,
-                warning_number: null
-            }])
-            .select()
-            .single();
-
-        if (eventError) {
-            console.error("Event insert error:", eventError);
-            return res.status(500).json({
-                success: false,
-                message: "Unable to record proctoring event"
-            });
-        }
-
-        // Running violation total for the attempt. Conditional on the value
-        // just read, so two simultaneous events can't overwrite each other;
-        // re-read and retry when another event landed first.
-        let violationCount = Number(session.proctoring_warning_count) || 0;
-        if (isViolation) {
-            for (let attempt = 0; attempt < 3; attempt++) {
-                const { data: updated, error: updateError } = await supabase
-                    .from("exam_sessions")
-                    .update({ proctoring_warning_count: violationCount + 1 })
-                    .eq("id", sessionId)
-                    .eq("proctoring_warning_count", violationCount)
-                    .select("id");
-                if (updateError) {
-                    console.error("Violation count update error:", updateError);
-                    break;
-                }
-                if (updated && updated.length > 0) {
-                    violationCount += 1;
-                    break;
-                }
-                const { data: fresh } = await supabase
-                    .from("exam_sessions")
-                    .select("proctoring_warning_count")
-                    .eq("id", sessionId)
-                    .maybeSingle();
-                violationCount = Number(fresh?.proctoring_warning_count) || 0;
-            }
-        }
-
-        return res.json({
-            success: true,
-            message: "Proctoring event recorded",
-            recorded: true,
-            violation: isViolation,
-            violationCount,
-            blocked: false,
-            eventId: event.id
+        const isViolation = DURING_EXAM_WARNING_EVENTS.includes(eventType);
+        const { data: result, error: rpcError } = await supabase.rpc("record_exam_event", {
+            p_session_id: sessionId, p_candidate_id: candidateId, p_login_session_id: loginSessionId,
+            p_client_event_id: clientEventId || null, p_event_type: eventType,
+            p_event_message: typeof eventMessage === "string" ? eventMessage.trim().slice(0, MAX_EVENT_MESSAGE_LENGTH) : null,
+            p_occurred_at: occurredAt || null, p_is_violation: isViolation
         });
-
-
+        if (rpcError) throw rpcError;
+        if (result?.code) {
+            const status = result.code === "ACTIVE_SESSION_REQUIRED" ? 409 : result.code === "NOT_FOUND" ? 404
+                : result.code === "FORBIDDEN" || result.code === "NOT_IN_PROGRESS" ? 403 : 400;
+            return res.status(status).json({ success: false, code: result.code, status: result.status,
+                message: result.code === "NOT_IN_PROGRESS" ? "The event occurred after this examination ended." : "Unable to record this event." });
+        }
+        return res.json(result);
     } catch (error) {
-
-        console.error(
-            "Proctoring controller error:",
-            error
-        );
-
-
-        return res.status(500).json({
-
-            success: false,
-
-            message:
-                "Server error while recording the proctoring event"
-        });
+        console.error("[proctoring] atomic event save failed:", error.message);
+        return res.status(503).json({ success: false, message: "Unable to save the monitoring event. It will be retried. Verify migration 020 is applied." });
     }
 };
-
-
-// =====================================================
-// EXPORT
-// =====================================================
-
-module.exports = {
-    recordEvent
-};
+module.exports = { recordEvent };

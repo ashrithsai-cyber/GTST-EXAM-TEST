@@ -155,7 +155,7 @@ export function VideosPage() {
             ) : (
               <>
                 <p className="text-sm font-medium text-ink-700">Click to select a video file</p>
-                <p className="text-xs text-ink-400 mt-1">MP4, WebM, MOV, AVI or OGV</p>
+                <p className="text-xs text-ink-400 mt-1">Use MP4 with H.264 video and AAC audio for broad browser support. Test playback before requiring the video.</p>
               </>
             )}
             <input ref={fileRef} type="file" accept="video/*" className="hidden" onChange={handleFile} />
@@ -181,7 +181,7 @@ export function VideosPage() {
 
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete Video" size="sm" footer={<><Button variant="secondary" onClick={() => setConfirmDelete(false)}>Cancel</Button><Button variant="danger" onClick={remove}>Delete</Button></>}>
         <p className="text-sm text-ink-600">
-          Permanently delete this video? Students will fall back to the bundled default safety video until a new one is uploaded. This cannot be undone.
+          Permanently delete this video? If the instruction video is required, students cannot continue until a playable replacement is uploaded. This cannot be undone.
         </p>
       </Modal>
 

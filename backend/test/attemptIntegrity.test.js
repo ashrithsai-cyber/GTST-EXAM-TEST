@@ -158,6 +158,35 @@ test("Informational events are recorded without adding to the violation total", 
     assert.equal(sessionRow(a.sessionId).proctoring_warning_count, 0);
 });
 
+test('Offline violations retry once, including a pre-submission event delivered after completion', async () => {
+    const a = await startExam();
+    const body = { sessionId: a.sessionId, eventType: 'TAB_SWITCH', clientEventId: crypto.randomUUID(), occurredAt: new Date().toISOString() };
+    const first = await call('POST', '/api/exam/proctoring/event', { token: a.token, body });
+    assert.equal(first.status, 200);
+    const retry = await call('POST', '/api/exam/proctoring/event', { token: a.token, body });
+    assert.equal(retry.body.duplicate, true);
+    assert.equal(sessionRow(a.sessionId).proctoring_warning_count, 1);
+    const delayed = { ...body, clientEventId: crypto.randomUUID() };
+    submitDirectly(a.sessionId);
+    const saved = await call('POST', '/api/exam/proctoring/event', { token: a.token, body: delayed });
+    assert.equal(saved.status, 200);
+    assert.equal(saved.body.violationCount, 2);
+    assert.equal(sessionRow(a.sessionId).status, 'SUBMITTED');
+});
+
+test('Stricter fullscreen requirements invalidate a previously completed preflight before a new attempt', async () => {
+    const student = candidate('10');
+    const loggedIn = await login(student); const token = loggedIn.body.token;
+    assert.equal((await call('POST', '/api/exam/preflight/system-check', { token, body: {} })).status, 200);
+    assert.equal((await call('POST', '/api/exam/preflight/rules-accepted', { token })).status, 200);
+    const settings = db.db.tables.exam_settings[0]; settings.fullscreen_required = true;
+    try {
+        const result = await call('POST', '/api/exam/session/start', { token });
+        assert.equal(result.status, 403); assert.equal(result.body.code, 'PREFLIGHT_REQUIRED');
+        assert.equal(db.db.tables.exam_sessions.some(s => s.candidate_id === student.id), false);
+    } finally { settings.fullscreen_required = false; }
+});
+
 test("A violation reported after submission is refused and the attempt stays SUBMITTED", async () => {
     const a = await startExam();
     await submitDirectly(a.sessionId);

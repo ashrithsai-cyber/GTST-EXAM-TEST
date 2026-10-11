@@ -5,7 +5,7 @@
 //
 // Run: TEST_DATABASE_URL=postgres://user:pass@127.0.0.1:5432/postgres npm run test:postgres
 // The URL must point at localhost. A temporary database is created, all
-// real migrations 001-019 are applied to it, and it is dropped afterwards.
+// real migrations 001-020 are applied to it, and it is dropped afterwards.
 // Without TEST_DATABASE_URL every case is reported as skipped.
 const test = require("node:test");
 const assert = require("node:assert/strict");

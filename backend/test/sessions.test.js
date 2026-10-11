@@ -4,6 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const path = require("node:path");
+const ExcelJS = require("exceljs");
 process.env.STUDENT_JWT_SECRET = crypto.randomBytes(32).toString("hex");
 process.env.ADMIN_JWT_SECRET = crypto.randomBytes(32).toString("hex");
 process.env.NODE_ENV = "test";
@@ -175,6 +176,7 @@ test("Admin monitoring remains available with device leases and completed presen
     const dashboard = await call("/api/admin/dashboard", { token, method: "GET" });
     assert.equal(dashboard.status, 200);
     assert.ok(Number.isInteger(dashboard.body.dashboard.totalCandidates));
+    assert.equal(dashboard.body.dashboard.currentlyLoggedIn, dashboard.body.dashboard.totalCandidates);
     const student = candidate();
     const first = await login(student);
     const presence = db.db.tables.student_presence.find((row) => row.candidate_id === student.id);
@@ -182,6 +184,205 @@ test("Admin monitoring remains available with device leases and completed presen
     assert.equal((await call("/api/exam/auth/logout", { token: first.body.token })).status, 200);
     assert.equal(presence.stage, "COMPLETED");
     assert.ok(Date.now() - Date.parse(presence.updated_at) < 5_000);
+});
+
+test("Missing monitoring migration leaves student sessions and warning totals available", async (t) => {
+    const student = candidate();
+    const sessionId = crypto.randomUUID();
+    (db.db.tables.exam_sessions ||= []).push({
+        id: sessionId, candidate_id: student.id, exam_id: db.db.tables.exams[0].id,
+        status: "IN_PROGRESS", proctoring_warning_count: 4, last_activity_at: new Date().toISOString()
+    });
+    const originalRpc = db.rpc.bind(db);
+    t.mock.method(db, "rpc", async (name, args) => {
+        if (["admin_exam_attempt_progress", "admin_monitoring_event_summary"].includes(name)) {
+            return { data: null, error: { code: "PGRST202", message: `Could not find the function public.${name} in the schema cache` } };
+        }
+        return originalRpc(name, args);
+    });
+    const token = jwt.sign({ adminId, role: "admin", typ: "admin" }, process.env.ADMIN_JWT_SECRET, { expiresIn: "1h" });
+    const response = await call("/api/admin/sessions", { token, method: "GET" });
+    assert.equal(response.status, 200);
+    const session = response.body.sessions.find(row => row.id === sessionId);
+    assert.equal(session.proctoring_warning_count, 4);
+    assert.equal(session.attempt_progress, null);
+    assert.match(response.body.monitoringWarning, /021_admin_monitoring_summary.sql/);
+    const summary = await call("/api/admin/proctoring/event-summaries", { token, body: { sessionIds: [sessionId] } });
+    assert.equal(summary.status, 503);
+    assert.equal(summary.body.code, "MONITORING_MIGRATION_REQUIRED");
+    assert.equal(db.db.tables.exam_sessions.find(row => row.id === sessionId).status, "IN_PROGRESS");
+});
+
+test("Monitoring database outages are reported instead of mistaken for missing optional summaries", async (t) => {
+    t.mock.method(db, "rpc", async () => ({ data: null, error: { code: "08006", message: "connection failure" } }));
+    const token = jwt.sign({ adminId, role: "admin", typ: "admin" }, process.env.ADMIN_JWT_SECRET, { expiresIn: "1h" });
+    const sessions = await call("/api/admin/sessions", { token, method: "GET" });
+    assert.equal(sessions.status, 500);
+    const summaries = await call("/api/admin/proctoring/event-summaries", { token, body: { sessionIds: [crypto.randomUUID()] } });
+    assert.equal(summaries.status, 500);
+    assert.notEqual(summaries.body.code, "MONITORING_MIGRATION_REQUIRED");
+});
+
+test("Monitoring summaries remain admin-only", async () => {
+    const response = await call("/api/admin/proctoring/event-summaries", { body: { sessionIds: [crypto.randomUUID()] } });
+    assert.equal(response.status, 401);
+});
+
+test("Admin dashboard class activity is scoped to the active exam and eligible candidates", async () => {
+    const activeExamId = db.db.tables.exams.find((row) => row.status === "ACTIVE").id;
+    const inactiveExamId = crypto.randomUUID();
+    db.db.tables.exams.push({ id: inactiveExamId, status: "INACTIVE", exam_code: "OLD-TEST", exam_name: "Old Test", seconds_per_question: 60 });
+    const activeStudent = candidate();
+    const inactiveStudent = candidate();
+    const activeRow = db.db.tables.exam_candidates.find((row) => row.id === activeStudent.id);
+    const inactiveRow = db.db.tables.exam_candidates.find((row) => row.id === inactiveStudent.id);
+    activeRow.student_class = "Dashboard Active Scope";
+    inactiveRow.student_class = "Dashboard Inactive Scope";
+    (db.db.tables.exam_sessions ||= []).push(
+        { id: crypto.randomUUID(), candidate_id: activeStudent.id, exam_id: activeExamId, status: "IN_PROGRESS", proctoring_warning_count: 0 },
+        { id: crypto.randomUUID(), candidate_id: inactiveStudent.id, exam_id: inactiveExamId, status: "SUBMITTED", proctoring_warning_count: 0 }
+    );
+    const token = jwt.sign({ adminId, role: "admin", typ: "admin" }, process.env.ADMIN_JWT_SECRET, { expiresIn: "1h" });
+    const response = await call("/api/admin/dashboard", { token, method: "GET" });
+    assert.equal(response.status, 200);
+    const activeBreakdown = response.body.dashboard.classBreakdown.find((row) => row.studentClass === "Dashboard Active Scope");
+    assert.equal(activeBreakdown.present, 1);
+    assert.equal(activeBreakdown.ongoing, 1);
+    assert.equal(response.body.dashboard.classBreakdown.some((row) => row.studentClass === "Dashboard Inactive Scope"), false);
+    assert.ok(response.body.dashboard.eligibleCandidates >= 2);
+});
+
+test("Admin dashboard exam and date filters return bounded daily submission and score trends", async () => {
+    const examId = crypto.randomUUID();
+    db.db.tables.exams.push({
+        id: examId, status: "INACTIVE", exam_code: "TREND-TEST",
+        exam_name: "Trend Test", seconds_per_question: 60
+    });
+    const included = candidate();
+    const outsideRange = candidate();
+    (db.db.tables.exam_sessions ||= []).push(
+        { id: crypto.randomUUID(), candidate_id: included.id, exam_id: examId, status: "SUBMITTED",
+            submitted_at: "2026-09-03T12:00:00.000Z", total_score: 3, max_score: 4 },
+        { id: crypto.randomUUID(), candidate_id: outsideRange.id, exam_id: examId, status: "SUBMITTED",
+            submitted_at: "2026-09-02T12:00:00.000Z", total_score: 0, max_score: 4 }
+    );
+    const token = jwt.sign({ adminId, role: "admin", typ: "admin" }, process.env.ADMIN_JWT_SECRET, { expiresIn: "1h" });
+    const response = await call(`/api/admin/dashboard?examId=${examId}&from=2026-09-03&to=2026-09-04`, { token, method: "GET" });
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body.dashboard.selectedExam, { id: examId, name: "Trend Test", status: "INACTIVE" });
+    assert.deepEqual(response.body.dashboard.dailyTrend, [
+        { date: "2026-09-03", submissions: 1, averageScorePercent: 75 },
+        { date: "2026-09-04", submissions: 0, averageScorePercent: null }
+    ]);
+    assert.equal(response.body.dashboard.sessionsSubmitted, 2);
+});
+
+test("Admin dashboard rejects malformed and overlong trend filters", async () => {
+    const token = jwt.sign({ adminId, role: "admin", typ: "admin" }, process.env.ADMIN_JWT_SECRET, { expiresIn: "1h" });
+    const malformed = await call("/api/admin/dashboard?examId=bad", { token, method: "GET" });
+    assert.equal(malformed.status, 400);
+    const tooLong = await call("/api/admin/dashboard?from=2026-01-01&to=2026-04-01", { token, method: "GET" });
+    assert.equal(tooLong.status, 400);
+});
+
+test("Admin result search filters all submissions before pagination", async () => {
+    const activeExamId = db.db.tables.exams.find((row) => row.status === "ACTIVE").id;
+    const firstStudent = candidate();
+    const matchingStudent = candidate();
+    const matchingRegistration = matchingStudent.registrationId;
+    const now = Date.now();
+    (db.db.tables.exam_sessions ||= []).push(
+        { id: crypto.randomUUID(), candidate_id: firstStudent.id, exam_id: activeExamId, status: "SUBMITTED", submitted_at: new Date(now).toISOString(), total_score: 1, max_score: 2 },
+        { id: crypto.randomUUID(), candidate_id: matchingStudent.id, exam_id: activeExamId, status: "SUBMITTED", submitted_at: new Date(now - 60_000).toISOString(), total_score: 2, max_score: 2 }
+    );
+    const token = jwt.sign({ adminId, role: "admin", typ: "admin" }, process.env.ADMIN_JWT_SECRET, { expiresIn: "1h" });
+    const response = await call(`/api/admin/results?page=1&limit=1&search=${encodeURIComponent(matchingRegistration)}`, { token, method: "GET" });
+    assert.equal(response.status, 200);
+    assert.equal(response.body.total, 1);
+    assert.equal(response.body.results.length, 1);
+    assert.equal(response.body.results[0].exam_candidates.registration_id, matchingRegistration);
+});
+
+test("Admin result CSV export includes the full filtered dataset and neutralizes spreadsheet formulas", async () => {
+    const activeExamId = db.db.tables.exams.find((row) => row.status === "ACTIVE").id;
+    const matchingStudent = candidate();
+    db.db.tables.exam_candidates.find((row) => row.id === matchingStudent.id).full_name = "=HYPERLINK(\"https://example.invalid\")";
+    const otherStudent = candidate();
+    (db.db.tables.exam_sessions ||= []).push(
+        { id: crypto.randomUUID(), candidate_id: matchingStudent.id, exam_id: activeExamId, status: "SUBMITTED", submitted_at: new Date().toISOString(), total_score: 1, max_score: 2 },
+        { id: crypto.randomUUID(), candidate_id: otherStudent.id, exam_id: activeExamId, status: "SUBMITTED", submitted_at: new Date(Date.now() - 60_000).toISOString(), total_score: 2, max_score: 2 }
+    );
+    const token = jwt.sign({ adminId, role: "admin", typ: "admin" }, process.env.ADMIN_JWT_SECRET, { expiresIn: "1h" });
+    const response = await fetch(`${baseUrl}/api/admin/results/export.csv?search=${encodeURIComponent(matchingStudent.registrationId)}`, {
+        headers: { Authorization: "Bearer " + token }
+    });
+    const csv = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type"), /text\/csv/);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.match(csv, /"'=HYPERLINK\(""https:\/\/example\.invalid""\)"/);
+    assert.doesNotMatch(csv, new RegExp(otherStudent.registrationId));
+});
+
+test("Admin result XLSX export applies exam, class, and date filters", async () => {
+    const examId = db.db.tables.exams[0].id;
+    const included = candidate();
+    const excluded = candidate();
+    db.db.tables.exam_candidates.find((row) => row.id === included.id).student_class = "10";
+    db.db.tables.exam_candidates.find((row) => row.id === excluded.id).student_class = "9";
+    const submittedAt = new Date("2026-09-03T12:00:00.000Z").toISOString();
+    (db.db.tables.exam_sessions ||= []).push(
+        { id: crypto.randomUUID(), candidate_id: included.id, exam_id: examId, status: "SUBMITTED", submitted_at: submittedAt, total_score: 3, max_score: 4 },
+        { id: crypto.randomUUID(), candidate_id: excluded.id, exam_id: examId, status: "SUBMITTED", submitted_at: submittedAt, total_score: 1, max_score: 4 }
+    );
+    const token = jwt.sign({ adminId, role: "admin", typ: "admin" }, process.env.ADMIN_JWT_SECRET, { expiresIn: "1h" });
+    const response = await fetch(`${baseUrl}/api/admin/results/export.xlsx?examId=${examId}&className=10&from=2026-09-03&to=2026-09-03&search=${encodeURIComponent(included.registrationId)}`, {
+        headers: { Authorization: "Bearer " + token }
+    });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type"), /spreadsheetml/);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(Buffer.from(await response.arrayBuffer()));
+    const sheet = workbook.getWorksheet("Results");
+    assert.equal(sheet.rowCount, 2);
+    assert.equal(sheet.getRow(2).getCell(2).value, included.registrationId);
+});
+
+test("Admin violation XLSX export applies filters and omits connectivity telemetry", async () => {
+    const student = candidate();
+    const examId = db.db.tables.exams[0].id;
+    const sessionId = crypto.randomUUID();
+    db.db.tables.exam_sessions ||= [];
+    db.db.tables.exam_sessions.push({
+        id: sessionId, candidate_id: student.id, exam_id: examId, status: "SUBMITTED"
+    });
+    const at = "2026-10-10T12:00:00.000Z";
+    db.db.tables.exam_events ||= [];
+    db.db.tables.exam_events.push(
+        { id: crypto.randomUUID(), session_id: sessionId, event_type: "CAMERA_DISABLED", event_message: "camera", created_at: at, reviewed: false, is_violation: true },
+        { id: crypto.randomUUID(), session_id: sessionId, event_type: "NETWORK_DISCONNECT", event_message: "offline", created_at: at, reviewed: false, is_violation: false },
+        { id: crypto.randomUUID(), session_id: sessionId, event_type: "TAB_SWITCH", event_message: "outside date", created_at: "2026-10-09T12:00:00.000Z", reviewed: false, is_violation: true }
+    );
+    const token = jwt.sign({ adminId, role: "admin", typ: "admin" }, process.env.ADMIN_JWT_SECRET, { expiresIn: "1h" });
+    const response = await fetch(`${baseUrl}/api/admin/proctoring/events/export.xlsx?examId=${examId}&className=10&from=2026-10-10&to=2026-10-10&reviewed=false`, {
+        headers: { Authorization: "Bearer " + token }
+    });
+    assert.equal(response.status, 200);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(Buffer.from(await response.arrayBuffer()));
+    const sheet = workbook.getWorksheet("Proctoring Violations");
+    assert.equal(sheet.rowCount, 2);
+    assert.equal(sheet.getRow(2).getCell(6).value, "CAMERA_DISABLED");
+});
+
+test("Results and violation exports require an authenticated admin", async () => {
+    for (const route of [
+        "/api/admin/results/export.csv", "/api/admin/results/export.xlsx",
+        "/api/admin/proctoring/events/export.csv", "/api/admin/proctoring/events/export.xlsx"
+    ]) {
+        const response = await fetch(`${baseUrl}${route}`);
+        assert.equal(response.status, 401, route);
+    }
 });
 
 test("Admin disconnected count uses heartbeat even when no recent answer was submitted", async () => {

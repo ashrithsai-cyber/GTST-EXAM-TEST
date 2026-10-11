@@ -87,7 +87,7 @@ GTST-EXAM-PORTEL/
 │       ├── newadmin/        Pages, UI components, types, adapters
 │       └── services/        API client, admin API wrappers, monitoring aggregation
 ├── backend/
-│   ├── sql/                 Exam-database migrations 001–019, read-only audit query, 019 rollback
+│   ├── sql/                 Exam-database migrations 001–023, read-only audit query, rollback scripts
 │   ├── src/
 │   │   ├── config/          Supabase clients (service role, server-side only)
 │   │   ├── controllers/     Request handlers; _examShared.js holds exam/attempt logic
@@ -208,7 +208,7 @@ NODE_ENV=production npm start
 
 Summary (step-by-step in [`docs/deployment.md`](docs/deployment.md)):
 
-1. **Supabase:** run migrations `001`–`019` on the exam project, check buckets, then create the first admin.
+1. **Supabase:** verify applied migration state and a restorable backup, then apply only pending migrations `001`–`021` in order on the exam project; check buckets, then create the first admin.
 2. **Backend:** deploy `backend/` to a Node host over HTTPS, set every backend variable, `NODE_ENV=production`, and `TRUST_PROXY` if behind a proxy. Check `GET /api/health`.
 3. **Student portal:** build with `VITE_API_URL`, deploy `dist/` to a static host with an SPA rewrite to `index.html`, and `.wasm` served compressed.
 4. **Admin dashboard:** build with `VITE_API_URL`, deploy `admin-frontend/dist/` so it is served **under `/admin/`**, with an SPA rewrite to `/admin/index.html`.
@@ -217,10 +217,12 @@ Summary (step-by-step in [`docs/deployment.md`](docs/deployment.md)):
 
 ## 11. Database
 
-Migrations live in [`backend/sql/`](backend/sql/README.md). Run them in the exam
-project's SQL Editor **in numeric order, 001 → 019**. `017`–`019` are one unit:
-apply all three, then (re)start the backend. Never re-run `001` on an existing
-database. Data model and integrity notes: [`docs/database.md`](docs/database.md).
+Migrations live in [`backend/sql/`](backend/sql/README.md). Verify the applied
+state and backup first, then run only pending files in numeric order, 001 → 023.
+Do not blindly replay historical migrations on a populated database: 001 is
+incompatible after 010, which includes destructive legacy/sample-data cleanup.
+Apply pending 017–023 before deploying the matching backend. Data model and
+integrity notes: [`docs/database.md`](docs/database.md).
 
 > Migration `001` seeds a sample exam `GTST-2026` with 60 placeholder questions.
 > Before the live exam, an admin must make sure the **real** exam is the only
@@ -290,7 +292,7 @@ student, and disabled categories are not recorded.
 ## 16. Production checklist
 
 - [ ] **All Supabase service-role keys and both JWT secrets rotated** (see the audit report; the current values were found inside a project archive)
-- [ ] Migrations `001`–`019` applied; `backend/sql/checks/attempt_consistency_audit.sql` reports all zeros
+- [ ] Migration state verified and pending migrations through `021` applied; `backend/sql/checks/attempt_consistency_audit.sql` reports all zeros
 - [ ] Buckets: `mock-videos` public, `exam-branding` public, `system-check-screenshots` **private**
 - [ ] Backend: `NODE_ENV=production`, both `*_ALLOWED_ORIGINS` set to real HTTPS origins, `TRUST_PROXY` set if proxied, health check OK
 - [ ] Both frontends built with the production `VITE_API_URL`; everything served over HTTPS

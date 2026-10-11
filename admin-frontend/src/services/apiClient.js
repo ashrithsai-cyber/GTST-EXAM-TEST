@@ -3,8 +3,8 @@
 // loaded from (so it still works from a LAN IP), unless VITE_API_URL is
 // set explicitly. Both frontends talk to the same single Express backend.
 export const API_BASE_URL =
-  import.meta.env.VITE_API_URL ||
-  (import.meta.env.DEV
+  import.meta.env?.VITE_API_URL ||
+  (import.meta.env?.DEV
     ? `${window.location.protocol}//${window.location.hostname}:5000`
     : '');
 
@@ -34,24 +34,45 @@ export function onSessionExpired(handler) {
   return () => window.removeEventListener(SESSION_EXPIRED_EVENT, handler);
 }
 
+export const REQUEST_TIMEOUT_MS = 25000;
+
+async function withTimeout(path, options, readResponse) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${API_BASE_URL}${path}`, { ...options, signal: controller.signal });
+    if (response.status === 401) {
+      clearToken();
+      window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+    }
+    return await readResponse(response);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const timeoutError = new Error('The server took too long to respond. Check your connection and retry.');
+      timeoutError.status = 0;
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function request(method, path, { body, isFormData } = {}) {
   const headers = {};
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
   if (!isFormData && body !== undefined) headers["Content-Type"] = "application/json";
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  return withTimeout(path, {
     method,
     headers,
     body: isFormData ? body : body !== undefined ? JSON.stringify(body) : undefined,
+  }, async response => {
+    const data = await response.json().catch(() => {
+      if (!response.ok) return {};
+      throw new Error('The server returned an invalid response. Check the backend API URL and retry.');
   });
-
-  const data = await response.json().catch(() => ({}));
-
-  if (response.status === 401) {
-    clearToken();
-    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
-  }
 
   if (!response.ok) {
     const error = new Error(data.message || "Request failed");
@@ -61,6 +82,7 @@ async function request(method, path, { body, isFormData } = {}) {
   }
 
   return data;
+  });
 }
 
 export const apiGet = (path) => request("GET", path);
@@ -79,22 +101,17 @@ export async function apiDownload(path, filename) {
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const response = await fetch(`${API_BASE_URL}${path}`, { method: "GET", headers });
+  const blob = await withTimeout(path, { method: "GET", headers }, async response => {
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      const error = new Error(data.message || "Download failed");
+      error.status = response.status;
+      error.data = data;
+      throw error;
+    }
 
-  if (response.status === 401) {
-    clearToken();
-    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
-  }
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    const error = new Error(data.message || "Download failed");
-    error.status = response.status;
-    error.data = data;
-    throw error;
-  }
-
-  const blob = await response.blob();
+    return response.blob();
+  });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -115,20 +132,15 @@ export async function apiGetBlob(path) {
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const response = await fetch(`${API_BASE_URL}${path}`, { method: "GET", headers });
+  return withTimeout(path, { method: "GET", headers }, async response => {
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      const error = new Error(data.message || "Request failed");
+      error.status = response.status;
+      error.data = data;
+      throw error;
+    }
 
-  if (response.status === 401) {
-    clearToken();
-    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
-  }
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    const error = new Error(data.message || "Request failed");
-    error.status = response.status;
-    error.data = data;
-    throw error;
-  }
-
-  return response.blob();
+    return response.blob();
+  });
 }

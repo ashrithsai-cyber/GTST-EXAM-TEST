@@ -2,6 +2,8 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { AuthContext } from './AuthContext';
 import { fetchExamSettings } from '../services/examService';
 import { useCamera } from '../hooks/useCamera';
+import { useMicrophone } from '../hooks/useMicrophone';
+import { useFullscreen } from '../hooks/useFullscreen';
 
 // Fail-safe default if the settings fetch hasn't resolved yet, or fails
 // entirely — identical to what every check has always required, so a
@@ -63,6 +65,7 @@ function saveGates(registrationId, gates) {
 export const SystemCheckProvider = ({ children }) => {
   const { student, token } = useContext(AuthContext);
   const registrationId = student?.registrationId || null;
+  const hasToken = Boolean(token);
 
   const [cameraReady, setCameraReady] = useState(false);
   const [microphoneReady, setMicrophoneReady] = useState(false);
@@ -77,6 +80,8 @@ export const SystemCheckProvider = ({ children }) => {
   const [gatesHydrated, setGatesHydrated] = useState(false);
   const hydratingRegistrationIdRef = React.useRef(null);
   const camera = useCamera({ enabled: Boolean(student && settingsLoaded && examFlowActive && examSettings.cameraRequired) });
+  const microphone = useMicrophone({ enabled: Boolean(student && settingsLoaded && examFlowActive && examSettings.microphoneRequired) });
+  const fullscreen = useFullscreen();
 
   // Fetched once per login — the single source of truth for which
   // checks this exam actually requires (see backend/src/controllers/
@@ -109,7 +114,7 @@ export const SystemCheckProvider = ({ children }) => {
         if (!cancelled) setSettingsLoaded(true);
       });
     return () => { cancelled = true; };
-  }, [student, token]);
+  }, [registrationId, hasToken]);
 
   // Re-derive gates whenever the authenticated student changes — covers
   // login, logout (registrationId becomes null → gates clear), and a
@@ -174,6 +179,7 @@ export const SystemCheckProvider = ({ children }) => {
       examFlowActive,
       setExamFlowActive,
       camera,
+      microphone, fullscreen,
       resetSystemCheck, completeSystemCheck, completeProctoringRules
     }}>
       {children}

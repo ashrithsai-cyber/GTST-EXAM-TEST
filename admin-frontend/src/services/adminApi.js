@@ -13,7 +13,10 @@ const MAX_PAGE_SIZE = 100;
 // DASHBOARD
 // =====================================================
 
-export const getDashboard = () => apiGet("/api/admin/dashboard");
+export const getDashboard = (params = {}) => {
+  const query = new URLSearchParams(params).toString();
+  return apiGet(`/api/admin/dashboard${query ? `?${query}` : ""}`);
+};
 
 // =====================================================
 // CANDIDATES
@@ -45,6 +48,8 @@ export const updateExamStatus = (examId, status) =>
   apiPatch(`/api/admin/exams/${examId}/status`, { status });
 export const updateResultsPublication = (examId, published) =>
   apiPatch(`/api/admin/exams/${examId}/results-publication`, { published });
+export const resetExamAttempts = (examId) =>
+  apiPost(`/api/admin/exams/${examId}/reset-attempts`, {});
 export const deleteExam = (examId) => apiDelete(`/api/admin/exams/${examId}`);
 
 // =====================================================
@@ -111,6 +116,14 @@ export const listResults = (params = {}) => {
   const query = new URLSearchParams({ limit: MAX_PAGE_SIZE, ...params }).toString();
   return apiGet(`/api/admin/results?${query}`);
 };
+export const exportResultsCsv = (params = {}) => {
+  const query = new URLSearchParams(params).toString();
+  return apiDownload(`/api/admin/results/export.csv${query ? `?${query}` : ""}`, "gtst-exam-results.csv");
+};
+export const exportResultsXlsx = (params = {}) => {
+  const query = new URLSearchParams(params).toString();
+  return apiDownload(`/api/admin/results/export.xlsx${query ? `?${query}` : ""}`, "gtst-exam-results.xlsx");
+};
 
 // =====================================================
 // PROCTORING / VIOLATIONS
@@ -120,6 +133,19 @@ export const listProctoringEvents = (params = {}) => {
   const query = new URLSearchParams({ limit: MAX_PAGE_SIZE, ...params }).toString();
   return apiGet(`/api/admin/proctoring/events?${query}`);
 };
+
+export const exportProctoringEventsCsv = (params = {}) => {
+  const query = new URLSearchParams(params).toString();
+  return apiDownload(`/api/admin/proctoring/events/export.csv${query ? `?${query}` : ""}`, "gtst-proctoring-violations.csv");
+};
+
+export const exportProctoringEventsXlsx = (params = {}) => {
+  const query = new URLSearchParams(params).toString();
+  return apiDownload(`/api/admin/proctoring/events/export.xlsx${query ? `?${query}` : ""}`, "gtst-proctoring-violations.xlsx");
+};
+
+export const summarizeMonitoringEvents = (sessionIds) =>
+  apiPost("/api/admin/proctoring/event-summaries", { sessionIds });
 
 export const reviewProctoringEvent = (eventId) =>
   apiPatch(`/api/admin/proctoring/events/${eventId}/review`, {});

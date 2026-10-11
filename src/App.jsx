@@ -19,6 +19,8 @@ import ProtectedRoute from './components/common/ProtectedRoute';
 import SystemCheckRoute from './components/common/SystemCheckRoute';
 import ProctoringRoute from './components/common/ProctoringRoute';
 import LiveCameraPreview from './components/common/LiveCameraPreview';
+import ExamSafety from './components/common/ExamSafety';
+import { MonitoringProvider } from './context/MonitoringContext';
 
 import './App.css';
 
@@ -29,6 +31,7 @@ function App() {
         <SystemCheckProvider>
           <ExamProvider>
             <Router>
+              <MonitoringProvider>
               <Routes>
                 <Route path="/" element={<Landing />} />
                 <Route path="/student-login" element={<Navigate to="/" replace />} />
@@ -54,6 +57,8 @@ function App() {
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
               <LiveCameraPreview />
+              <ExamSafety />
+              </MonitoringProvider>
             </Router>
           </ExamProvider>
         </SystemCheckProvider>

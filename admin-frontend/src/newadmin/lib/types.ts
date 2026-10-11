@@ -134,6 +134,11 @@ export interface RawSession {
   total_score: number | null;
   max_score: number | null;
   proctoring_warning_count: number | null;
+  attempt_progress?: {
+    attempted: number;
+    total: number;
+    current_subject: string | null;
+  } | null;
   exams: { exam_name: string; seconds_per_question: number } | null;
   exam_candidates: {
     registration_id: string;
@@ -207,7 +212,8 @@ export interface AuditLogEntry {
 }
 
 export interface DashboardStats {
-  totalCandidates: number;
+  currentlyLoggedIn: number;
+  eligibleCandidates: number;
   totalExams: number;
   sessionsInProgress: number;
   sessionsSubmitted: number;
@@ -216,6 +222,9 @@ export interface DashboardStats {
   sessionsDisconnected: number;
   averageScorePercent: number | null;
   classBreakdown: { studentClass: string; present: number; ongoing: number; completed: number; alerts: number }[];
+  selectedExam: { id: string; name: string; status: ExamStatus } | null;
+  trendRange: { from: string; to: string } | null;
+  dailyTrend: { date: string; submissions: number; averageScorePercent: number | null }[];
 }
 
 // Shaped to match settings.controller.js's getSettings/updateSettings

@@ -13,6 +13,7 @@ const {
     updateExam,
     updateExamStatus,
     updateResultsPublication,
+    resetExamAttempts,
     deleteExam,
     listClasses,
     createClass,
@@ -32,7 +33,12 @@ const {
     getSessionResult,
     getSessionAnswerSheet,
     listResults,
+    exportResultsCsv,
+    exportResultsXlsx,
     listProctoringEvents,
+    exportProctoringEventsCsv,
+    exportProctoringEventsXlsx,
+    summarizeMonitoringEvents,
     reviewProctoringEvent,
     listAuditLogs,
     listAdminUsers,
@@ -83,6 +89,7 @@ router.get("/exams/:examId", getExam);
 router.put("/exams/:examId", updateExam);
 router.patch("/exams/:examId/status", updateExamStatus);
 router.patch("/exams/:examId/results-publication", updateResultsPublication);
+router.post("/exams/:examId/reset-attempts", resetExamAttempts);
 router.delete("/exams/:examId", deleteExam);
 
 router.get("/exams/:examId/classes", listClasses);
@@ -111,9 +118,14 @@ router.get("/sessions/:sessionId", getSession);
 router.get("/sessions/:sessionId/result", getSessionResult);
 router.get("/sessions/:sessionId/answer-sheet", getSessionAnswerSheet);
 
+router.get("/results/export.csv", exportResultsCsv);
+router.get("/results/export.xlsx", exportResultsXlsx);
 router.get("/results", listResults);
 
+router.get("/proctoring/events/export.csv", exportProctoringEventsCsv);
+router.get("/proctoring/events/export.xlsx", exportProctoringEventsXlsx);
 router.get("/proctoring/events", listProctoringEvents);
+router.post("/proctoring/event-summaries", summarizeMonitoringEvents);
 router.patch("/proctoring/events/:eventId/review", reviewProctoringEvent);
 
 router.get("/audit-logs", listAuditLogs);

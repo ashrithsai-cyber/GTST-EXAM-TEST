@@ -13,7 +13,8 @@ import type {
 
 export function toDashboardStats(raw: any): DashboardStats {
   return {
-    totalCandidates: raw.totalCandidates ?? 0,
+    currentlyLoggedIn: raw.currentlyLoggedIn ?? raw.totalCandidates ?? 0,
+    eligibleCandidates: raw.eligibleCandidates ?? 0,
     totalExams: raw.totalExams ?? 0,
     sessionsInProgress: raw.sessionsInProgress ?? 0,
     sessionsSubmitted: raw.sessionsSubmitted ?? 0,
@@ -22,6 +23,9 @@ export function toDashboardStats(raw: any): DashboardStats {
     sessionsDisconnected: raw.sessionsDisconnected ?? 0,
     averageScorePercent: raw.averageScorePercent ?? null,
     classBreakdown: raw.classBreakdown ?? [],
+    selectedExam: raw.selectedExam ?? null,
+    trendRange: raw.trendRange ?? null,
+    dailyTrend: raw.dailyTrend ?? [],
   };
 }
 

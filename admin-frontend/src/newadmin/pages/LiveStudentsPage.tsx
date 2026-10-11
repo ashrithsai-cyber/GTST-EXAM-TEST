@@ -32,17 +32,18 @@ const EVENT_LABELS: Record<string, string> = {
   EXAM_LEFT: 'Left exam page',
 };
 
-function violationCountFor(counters: any): number {
-  if (!counters) return 0;
-  return (counters.cameraChanges || 0) + (counters.tabSwitches || 0) + (counters.fullscreenExits || 0) +
-    (counters.microphoneLosses || 0) + (counters.rightClicks || 0) + (counters.networkDrops || 0);
+function violationCountFor(counters: any, savedWarnings: number): number {
+  return typeof counters?.violationCount === 'number' ? counters.violationCount : savedWarnings;
 }
 
 export function LiveStudentsPage({ onSync }: { onSync: (status: 'connected' | 'reconnecting' | 'offline') => void }) {
   const [sessions, setSessions] = useState<RawSession[]>([]);
-  const [layoutCache, setLayoutCache] = useState<Map<string, { name: string; count: number }[]>>(new Map());
   const [eventCounts, setEventCounts] = useState<Map<string, any>>(new Map());
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [monitoringWarning, setMonitoringWarning] = useState('');
+  const [retry, setRetry] = useState(0);
+  const [hasLoaded, setHasLoaded] = useState(false);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [examFilter, setExamFilter] = useState('all');
@@ -53,9 +54,7 @@ export function LiveStudentsPage({ onSync }: { onSync: (status: 'connected' | 'r
 
   useEffect(() => {
     let cancelled = false;
-    // A full refresh pages through every session, candidate and event, so
-    // it grows with the exam. Skip a tick while the previous one is still
-    // running instead of stacking concurrent reloads on the database.
+    // Do not overlap polling while a previous request is still running.
     let inFlight = false;
     const load = async () => {
       if (inFlight) return;
@@ -64,14 +63,19 @@ export function LiveStudentsPage({ onSync }: { onSync: (status: 'connected' | 'r
         const data = await fetchMonitoringData();
         if (cancelled) return;
         setSessions(data.sessions);
-        setLayoutCache(data.layoutCache);
         setEventCounts(data.eventCounts);
-        setLoading(false);
+        setMonitoringWarning(data.monitoringWarning || '');
+        setLoadError('');
+        setHasLoaded(true);
         onSync('connected');
       } catch (err) {
         console.error('[LiveStudentsPage] refresh failed:', err);
-        if (!cancelled) onSync('reconnecting');
+        if (!cancelled) {
+          setLoadError(err instanceof Error ? err.message : 'Unable to load live students.');
+          onSync('reconnecting');
+        }
       } finally {
+        if (!cancelled) setLoading(false);
         inFlight = false;
       }
     };
@@ -82,7 +86,7 @@ export function LiveStudentsPage({ onSync }: { onSync: (status: 'connected' | 'r
       clearInterval(interval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [retry, onSync]);
 
   useEffect(() => {
     if (!selected) {
@@ -103,18 +107,17 @@ export function LiveStudentsPage({ onSync }: { onSync: (status: 'connected' | 'r
 
   const rows = useMemo(() => {
     return sessions.map((s) => {
-      const layout = s.class_id ? layoutCache.get(s.class_id) : undefined;
-      const progress = progressForSession(s, layout);
+      const progress = progressForSession(s);
       const counters = eventCounts.get(s.id);
       return {
         session: s,
         displayStatus: deriveStatus(s) as SessionDisplayStatus,
         label: statusLabel(s) as string,
         progress,
-        violationCount: violationCountFor(counters),
+        violationCount: violationCountFor(counters, s.proctoring_warning_count || 0),
       };
     });
-  }, [sessions, layoutCache, eventCounts]);
+  }, [sessions, eventCounts]);
 
   const filtered = useMemo(() => {
     let result = rows.filter((r) => {
@@ -140,7 +143,7 @@ export function LiveStudentsPage({ onSync }: { onSync: (status: 'connected' | 'r
 
   const selectedRow = selected ? rows.find((r) => r.session.id === selected.id) : undefined;
 
-  if (loading) {
+  if (loading && !hasLoaded && !loadError) {
     return <PageContainer><div className="flex items-center justify-center py-24 text-ink-400 text-sm">Loading live students…</div></PageContainer>;
   }
 
@@ -150,6 +153,15 @@ export function LiveStudentsPage({ onSync }: { onSync: (status: 'connected' | 'r
         <h1 className="text-xl font-bold text-ink-900 tracking-tight">Live Students</h1>
         <p className="text-sm text-ink-500 mt-1">Real-time monitoring of all active, blocked and recently submitted exam sessions</p>
       </div>
+
+      {loadError && <div className="rounded-lg border border-danger-200 bg-danger-50 p-4 mb-4" role="alert">
+        <p className="text-sm text-danger-700">{loadError}</p>
+        {hasLoaded && <p className="text-xs text-danger-700 mt-1">Showing the last successfully loaded data. It may be out of date.</p>}
+        <button type="button" className="mt-2 text-sm font-semibold underline text-danger-700" onClick={() => setRetry(value => value + 1)}>Retry Live Students</button>
+      </div>}
+      {monitoringWarning && <p className="rounded-lg border border-warning-200 bg-warning-50 p-4 mb-4 text-sm text-warning-700" role="status">{monitoringWarning} Session status and warning totals remain available.</p>}
+
+      {!hasLoaded ? null : <>
 
       <Card className="mb-4">
         <CardBody className="flex flex-col gap-3 lg:flex-row lg:items-center">
@@ -225,7 +237,7 @@ export function LiveStudentsPage({ onSync }: { onSync: (status: 'connected' | 'r
                           <div className="w-16 h-1.5 rounded-full bg-ink-100 overflow-hidden">
                             <div className="h-full rounded-full bg-brand-500" style={{ width: `${r.progress.total ? (r.progress.attempted / r.progress.total) * 100 : 0}%` }} />
                           </div>
-                          <span className="text-xs text-ink-500 tabular-nums">{r.progress.attempted}/{r.progress.total}</span>
+                          <span className="text-xs text-ink-500 tabular-nums">{r.progress.available ? `${r.progress.attempted}/${r.progress.total}` : '—'}</span>
                         </div>
                       </td>
                       <td className="px-4 py-3 text-sm text-ink-600">{r.progress.currentSubject}</td>
@@ -242,6 +254,7 @@ export function LiveStudentsPage({ onSync }: { onSync: (status: 'connected' | 'r
           </div>
         </Card>
       )}
+      </>}
 
       <Modal
         open={!!selected}
@@ -264,11 +277,13 @@ export function LiveStudentsPage({ onSync }: { onSync: (status: 'connected' | 'r
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm font-medium text-ink-700">Exam Progress</span>
                   <span className="text-sm font-bold text-ink-900 tabular-nums">
-                    {selectedRow.progress.attempted} / {selectedRow.progress.total} · {selectedRow.progress.total ? Math.round((selectedRow.progress.attempted / selectedRow.progress.total) * 100) : 0}%
+                    {selectedRow.progress.available
+                      ? `${selectedRow.progress.attempted} / ${selectedRow.progress.total} · ${Math.round((selectedRow.progress.attempted / selectedRow.progress.total) * 100)}%`
+                      : 'Snapshot unavailable'}
                   </span>
                 </div>
                 <div className="h-2.5 rounded-full bg-ink-200 overflow-hidden">
-                  <div className="h-full rounded-full bg-brand-600 transition-all duration-500" style={{ width: `${selectedRow.progress.total ? (selectedRow.progress.attempted / selectedRow.progress.total) * 100 : 0}%` }} />
+                  <div className="h-full rounded-full bg-brand-600 transition-all duration-500" style={{ width: `${selectedRow.progress.available ? (selectedRow.progress.attempted / selectedRow.progress.total) * 100 : 0}%` }} />
                 </div>
               </CardBody>
             </Card>

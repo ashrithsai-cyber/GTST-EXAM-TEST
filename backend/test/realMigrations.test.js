@@ -1,4 +1,4 @@
-// Applies the REAL migrations 001-019 in order to a clean in-memory
+// Applies the REAL migrations 001-023 in order to a clean in-memory
 // PostgreSQL (PGlite) and verifies relationships, constraints, status
 // rules and the attempt functions against that real schema. PGlite has a
 // single connection, so genuine lock contention is covered separately by
@@ -21,6 +21,201 @@ test.before(async () => {
     applied = await applyMigrations((sql) => db.exec(sql));
 });
 test.after(async () => { await db?.close(); });
+
+test('Real SQL records violations atomically, deduplicates retries, and protects finalized attempts', async () => {
+    const f = await fixture();
+    const args = { ...f.args, p_session_id: f.session, p_client_event_id: crypto.randomUUID(),
+        p_event_type: 'CAMERA_DISABLED', p_event_message: 'Unplugged',
+        p_occurred_at: new Date().toISOString(), p_is_violation: true };
+    assert.equal((await rpc('record_exam_event', args)).violationCount, 1);
+    assert.equal((await rpc('record_exam_event', args)).duplicate, true);
+    assert.equal((await one('select count(*)::integer as n from exam_events where session_id=$1', [f.session])).n, 1);
+    await rpc('submit_exam_attempt', { ...f.args, p_session_id: f.session });
+    const delayed = await rpc('record_exam_event', { ...args, p_client_event_id: crypto.randomUUID() });
+    assert.equal(delayed.violationCount, 2);
+    const late = await rpc('record_exam_event', { ...args, p_client_event_id: crypto.randomUUID(), p_occurred_at: null });
+    assert.equal(late.code, 'NOT_IN_PROGRESS');
+    assert.equal((await one('select status from exam_sessions where id=$1', [f.session])).status, 'SUBMITTED');
+    assert.equal((await one("select has_function_privilege('anon','record_exam_event(uuid,uuid,uuid,uuid,text,text,timestamptz,boolean)','EXECUTE') as allowed")).allowed, false);
+});
+
+test("Admin reset removes one inactive exam's attempts and releases affected students", async () => {
+    const f = await fixture();
+    await db.query("update classes set class_name='Reset 99' where id=$1", [f.cls]);
+    await db.query("update exam_candidates set student_class='99' where id=$1", [f.candidate]);
+    assert.equal((await rpc("admin_reset_exam_attempts", { p_exam_id: f.exam })).code, "EXAM_HAS_ACTIVE_ATTEMPTS");
+
+    await answer(f, f.questions[0], "B", false);
+    await rpc("record_exam_event", {
+        ...attempt(f), p_client_event_id: crypto.randomUUID(), p_event_type: "TAB_SWITCH",
+        p_event_message: "fixture violation", p_occurred_at: new Date().toISOString(), p_is_violation: true
+    });
+    await db.query(`insert into exam_preflight(candidate_id,exam_id,camera_check,system_check_completed_at)
+        values($1,$2,true,now())`, [f.candidate, f.exam]);
+    await db.query("insert into student_presence(candidate_id,stage) values($1,'IN_EXAM')", [f.candidate]);
+    await db.query(`insert into system_check_screenshots(candidate_id,exam_id,session_id,registration_id,storage_path)
+        values($1,$2,$3,$4,'fixture/photo.jpg')`, [f.candidate, f.exam, f.session, `REG-${f.candidate}`]);
+
+    await rpc("submit_exam_attempt", attempt(f));
+    const otherExam = crypto.randomUUID();
+    const otherClass = crypto.randomUUID();
+    const otherSubject = crypto.randomUUID();
+    await db.query("insert into exams(id,exam_code,exam_name,status,seconds_per_question) values($1,$2,'Other fixture','INACTIVE',60)", [otherExam, `OTHER-${otherExam}`]);
+    await db.query("insert into classes(id,exam_id,class_name,display_order) values($1,$2,'Other Reset 99',1)", [otherClass, otherExam]);
+    await db.query("insert into subjects(id,class_id,subject_key,subject_name,display_order) values($1,$2,'maths','Mathematics',1)", [otherSubject, otherClass]);
+    await db.query("insert into questions(subject_id,question_number,question_text,option_a,option_b,option_c,option_d,correct_option,marks) values($1,1,'Q','1','2','3','4','B',1)", [otherSubject]);
+    const otherStarted = await rpc("start_exam_attempt", {
+        ...f.args, p_exam_id: otherExam, p_class_id: otherClass, p_seconds_per_question: 60
+    });
+    assert.equal(otherStarted.created, true);
+    assert.equal((await rpc("admin_reset_exam_attempts", { p_exam_id: f.exam })).code, "CANDIDATE_ACTIVE_IN_ANOTHER_EXAM");
+    await rpc("submit_exam_attempt", { ...f.args, p_session_id: otherStarted.session.id });
+
+    const activeExam = await one("select id from exams where status='ACTIVE'");
+    if (activeExam) await db.query("update exams set status='INACTIVE' where id=$1", [activeExam.id]);
+    try {
+        await db.query("update exams set status='ACTIVE' where id=$1", [f.exam]);
+        assert.equal((await rpc("admin_reset_exam_attempts", { p_exam_id: f.exam })).code, "EXAM_ACTIVE");
+    } finally {
+        await db.query("update exams set status='INACTIVE' where id=$1", [f.exam]);
+        if (activeExam) await db.query("update exams set status='ACTIVE' where id=$1", [activeExam.id]);
+    }
+
+    const result = await rpc("admin_reset_exam_attempts", { p_exam_id: f.exam });
+    assert.equal(result.success, true);
+    assert.equal(result.deletedAttempts, 1);
+    assert.equal(result.deletedAnswers, 1);
+    assert.equal(result.deletedEvents, 1);
+    assert.equal(result.releasedLoginSessions, 1);
+    assert.equal(result.clearedPreflightRecords, 1);
+    assert.equal(result.clearedPresenceRecords, 1);
+    assert.equal((await one("select count(*)::int n from exam_sessions where exam_id=$1", [f.exam])).n, 0);
+    assert.equal((await one("select count(*)::int n from exam_answers where session_id=$1", [f.session])).n, 0);
+    assert.equal((await one("select count(*)::int n from exam_events where session_id=$1", [f.session])).n, 0);
+    assert.equal((await one("select count(*)::int n from student_login_sessions where candidate_id=$1", [f.candidate])).n, 0);
+    assert.equal((await one("select count(*)::int n from exam_candidates where id=$1", [f.candidate])).n, 1);
+    assert.equal((await one("select count(*)::int n from questions where id=$1", [f.questions[0]])).n, 1);
+    assert.equal((await one("select session_id from system_check_screenshots where candidate_id=$1 and exam_id=$2", [f.candidate, f.exam])).session_id, null);
+});
+
+test("Admin permanent delete removes exam data and returns private photo paths", async () => {
+    const f = await fixture();
+    await db.query(`insert into system_check_screenshots(candidate_id,exam_id,session_id,registration_id,storage_path)
+        values($1,$2,$3,$4,'fixture/permanent-delete.jpg')`,
+    [f.candidate, f.exam, f.session, `REG-${f.candidate}`]);
+
+    assert.equal((await rpc("admin_delete_exam_completely", { p_exam_id: f.exam })).code, "EXAM_HAS_ACTIVE_ATTEMPTS");
+    await answer(f, f.questions[0], "B", false);
+    await rpc("record_exam_event", {
+        ...attempt(f), p_client_event_id: crypto.randomUUID(), p_event_type: "TAB_SWITCH",
+        p_event_message: "fixture violation", p_occurred_at: new Date().toISOString(), p_is_violation: true
+    });
+    await rpc("submit_exam_attempt", attempt(f));
+
+    const activeExam = await one("select id from exams where status='ACTIVE'");
+    if (activeExam) await db.query("update exams set status='INACTIVE' where id=$1", [activeExam.id]);
+    try {
+        await db.query("update exams set status='ACTIVE' where id=$1", [f.exam]);
+        assert.equal((await rpc("admin_delete_exam_completely", { p_exam_id: f.exam })).code, "EXAM_ACTIVE");
+    } finally {
+        await db.query("update exams set status='INACTIVE' where id=$1", [f.exam]);
+        if (activeExam) await db.query("update exams set status='ACTIVE' where id=$1", [activeExam.id]);
+    }
+
+    const result = await rpc("admin_delete_exam_completely", { p_exam_id: f.exam });
+    assert.equal(result.success, true);
+    assert.equal(result.deletedAttempts, 1);
+    assert.equal(result.deletedAnswers, 1);
+    assert.equal(result.deletedEvents, 1);
+    assert.equal(result.deletedCheckInPhotos, 1);
+    assert.deepEqual(result.screenshotPaths, ["fixture/permanent-delete.jpg"]);
+    assert.equal((await one("select count(*)::int n from exams where id=$1", [f.exam])).n, 0);
+    assert.equal((await one("select count(*)::int n from classes where id=$1", [f.cls])).n, 0);
+    assert.equal((await one("select count(*)::int n from questions where id=$1", [f.questions[0]])).n, 0);
+    assert.equal((await one("select count(*)::int n from exam_sessions where id=$1", [f.session])).n, 0);
+    assert.equal((await one("select count(*)::int n from system_check_screenshots where exam_id=$1", [f.exam])).n, 0);
+    assert.equal((await one("select count(*)::int n from exam_candidates where id=$1", [f.candidate])).n, 1);
+});
+
+test("Monitoring event summary returns counts without raw event history", async () => {
+    const f = await fixture();
+    await db.query(`insert into exam_events(session_id,event_type,event_message,is_violation)
+        values ($1,'CAMERA_DISABLED','camera',true),($1,'TAB_SWITCH','tab',null),
+               ($1,'NETWORK_DISCONNECT','network',null)`, [f.session]);
+
+    const summary = await one("select * from admin_monitoring_event_summary(array[$1::uuid])", [f.session]);
+    assert.deepEqual(summary.event_counts, {
+        CAMERA_DISABLED: 1, TAB_SWITCH: 1, NETWORK_DISCONNECT: 1
+    });
+    assert.equal(summary.violation_count, 2);
+    assert.ok(summary.latest_event_at);
+    assert.equal((await one("select has_function_privilege('anon','admin_monitoring_event_summary(uuid[])','EXECUTE') as allowed")).allowed, false);
+});
+
+test("Admin monitoring progress follows the attempt snapshot, not later question-bank edits", async () => {
+    const f = await fixture({ questions: 3 });
+    const started = await one("select * from admin_exam_attempt_progress(array[$1::uuid])", [f.session]);
+    assert.deepEqual(started, {
+        session_id: f.session, attempted: 0, total: 3, current_subject: "Mathematics"
+    });
+
+    await answer(f, f.questions[0], "B");
+    await db.query("update subjects set subject_name='Renamed in bank' where id=$1", [f.subject]);
+    await db.query(`insert into questions(subject_id,question_number,question_text,option_a,option_b,option_c,option_d,correct_option,marks)
+        values($1,99,'Added after attempt start','1','2','3','4','B',1)`, [f.subject]);
+
+    const progressed = await one("select * from admin_exam_attempt_progress(array[$1::uuid])", [f.session]);
+    assert.deepEqual(progressed, {
+        session_id: f.session, attempted: 1, total: 3, current_subject: "Mathematics"
+    });
+});
+
+test("Migration 020 upgrades representative legacy exam data without rewriting it", async () => {
+    const currentDb = db;
+    db = new PGlite({ extensions: { pgcrypto } });
+    try {
+        await applyMigrations((sql) => db.exec(sql), { through: "019_attempt_integrity.sql" });
+        const f = await fixture();
+        const setting = await one("select id from exam_settings order by created_at limit 1");
+        await db.query("update exam_settings set camera_required=false, proctoring_enabled=false where id=$1", [setting.id]);
+        await db.query(`insert into exam_preflight(candidate_id,exam_id,camera_check,microphone_check,fullscreen_check)
+            values($1,$2,true,true,true)`, [f.candidate, f.exam]);
+        const legacyEvent = await one(`insert into exam_events(session_id,event_type,event_message,warning_number)
+            values($1,'TAB_SWITCH','legacy event',1) returning id,session_id,event_type,event_message,warning_number,created_at`,
+        [f.session]);
+
+        const migrations = await applyMigrations((sql) => db.exec(sql), { from: "020_reliable_proctoring.sql" });
+        assert.deepEqual(migrations, ["020_reliable_proctoring.sql", "021_admin_monitoring_summary.sql", "022_admin_reset_exam_attempts.sql", "023_admin_delete_exam_completely.sql"]);
+        const preservedEvent = await one(`select id,session_id,event_type,event_message,warning_number,created_at
+            from exam_events where id=$1`, [legacyEvent.id]);
+        assert.deepEqual(preservedEvent, legacyEvent);
+        assert.deepEqual(await one("select camera_required,proctoring_enabled from exam_settings where id=$1", [setting.id]),
+            { camera_required: false, proctoring_enabled: false });
+        assert.deepEqual(await one("select camera_check,microphone_check,fullscreen_check from exam_preflight where candidate_id=$1 and exam_id=$2", [f.candidate, f.exam]),
+            { camera_check: true, microphone_check: true, fullscreen_check: true });
+        assert.equal((await one(`select count(*)::int n from information_schema.columns
+            where table_schema='public' and table_name in ('exam_settings','exam_preflight')
+              and column_name like 'screen_sharing_%'`)).n, 0);
+        assert.equal((await one("select client_event_id,occurred_at,is_violation from exam_events where id=$1", [legacyEvent.id])).is_violation, null);
+
+        const recorded = await rpc("record_exam_event", {
+            ...f.args, p_session_id: f.session, p_client_event_id: crypto.randomUUID(),
+            p_event_type: "CAMERA_DISABLED", p_event_message: "new event",
+            p_occurred_at: new Date().toISOString(), p_is_violation: true
+        });
+        assert.equal(recorded.success, true);
+        const removedEvent = await rpc("record_exam_event", {
+            ...f.args, p_session_id: f.session, p_client_event_id: crypto.randomUUID(),
+            p_event_type: "SCREEN_SHARE_STOPPED", p_event_message: "legacy event",
+            p_occurred_at: new Date().toISOString(), p_is_violation: true
+        });
+        assert.equal(removedEvent.code, "INVALID_EVENT");
+        assert.equal((await one("select count(*)::int n from exam_events where session_id=$1", [f.session])).n, 2);
+    } finally {
+        await db.close();
+        db = currentDb;
+    }
+});
 
 const one = async (sql, params = []) => (await db.query(sql, params)).rows[0];
 async function rpc(name, args) {
@@ -62,11 +257,12 @@ const answer = (f, questionId, option, advance = true) => rpc("save_exam_answer"
 const sequence = async (f) => (await db.query("select question_id from exam_attempt_questions where session_id=$1 order by position", [f.session])).rows.map((row) => row.question_id);
 const sessionState = (f) => one("select * from exam_sessions where id=$1", [f.session]);
 
-test("All real migrations 001-019 apply in order to a clean database, and 002-019 are re-runnable", async () => {
+test("All real migrations 001-023 apply in order to a clean database and controlled reapplication preserves the fixture", async () => {
     assert.deepEqual(applied, migrationFiles());
-    assert.ok(applied.includes("019_attempt_integrity.sql"));
-    // 001 re-creates its seed rows against the pre-010 subjects.exam_id
-    // column, so only 002 onwards is safe to re-apply after 010.
+    assert.ok(applied.includes("020_reliable_proctoring.sql"));
+    // This reapplication is limited to the disposable clean PGlite fixture.
+    // It does not establish data-safe replay of historical migrations on a
+    // populated database (in particular, migration 010 performs data cleanup).
     await applyMigrations((sql) => db.exec(sql), { from: "002" });
     // 001's seed survives 010 by being given a class (fresh-install path).
     const seed = await one(`select count(distinct c.id)::int classes, count(q.id)::int questions
@@ -199,7 +395,7 @@ test("New functions are not executable by the browser roles", async () => {
     await db.exec("set role anon");
     try {
         for (const call of ["select block_exam_attempt(null,null,null,3)", "select start_exam_attempt(null,null,null,null,60)",
-            "select admin_release_student_login_session(null)"]) {
+            "select admin_release_student_login_session(null)", "select admin_delete_exam_completely(null)"]) {
             await assert.rejects(db.query(call), /permission denied/);
         }
     } finally { await db.exec("reset role"); }

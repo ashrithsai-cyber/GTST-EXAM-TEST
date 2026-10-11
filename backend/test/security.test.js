@@ -165,7 +165,12 @@ test("Test 3: session start is refused (403) until the server-side preflight is 
 
     // Photo + system check, but rules not accepted yet.
     assert.equal((await call("POST", "/api/exam/system-check/screenshot", { token: tokenA, form: photoForm() })).status, 200);
-    assert.equal((await call("POST", "/api/exam/preflight/system-check", { token: tokenA, body: ALL_CHECKS })).status, 200);
+    const legacyScreenSharingRequest = {
+        ...ALL_CHECKS,
+        screenSharing: false,
+        screenSharingSupported: true
+    };
+    assert.equal((await call("POST", "/api/exam/preflight/system-check", { token: tokenA, body: legacyScreenSharingRequest })).status, 200);
     res = await call("POST", "/api/exam/session/start", { token: tokenA });
     assert.equal(res.status, 403);
     assert.equal(res.body.code, "RULES_NOT_ACCEPTED");

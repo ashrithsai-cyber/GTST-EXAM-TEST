@@ -32,16 +32,18 @@ variables and `VITE_API_URL` match them exactly.
 
 ## 1. Supabase (exam project)
 
-1. **Migrations.** In the SQL Editor, run `backend/sql/001_*.sql` … `019_*.sql`
-   **in numeric order**. Fresh database: all 19. Existing database: only those not
-   yet applied. `017`, `018`, `019` go together, followed by a backend (re)start.
+1. **Migrations.** In the SQL Editor, run `backend/sql/001_*.sql` … `023_*.sql`
+   **in numeric order**. Fresh database: all 23. Existing database: only those not
+   yet applied. `017`–`023` are required for the matching backend features; apply
+   only after reviewing the target database and backup.
    Never re-run `001` on an existing database. Details: [`backend/sql/README.md`](../backend/sql/README.md).
-2. **Verify** (expect 10 rows and 1 row):
+2. **Verify** (expect 12 rows and 1 row):
    ```sql
    select proname from pg_proc where proname in
      ('init_exam_attempt','save_exam_answer','submit_exam_attempt','expire_exam_attempts',
       'acquire_student_login_session','touch_student_login_session','assert_exam_login_session',
-      'start_exam_attempt','block_exam_attempt','admin_release_student_login_session');
+      'start_exam_attempt','block_exam_attempt','admin_release_student_login_session',
+      'admin_reset_exam_attempts','admin_delete_exam_completely');
    select tgname from pg_trigger where tgname = 'exam_sessions_status_guard';
    ```
    Then run `backend/sql/checks/attempt_consistency_audit.sql`. Every check should be `0`.
@@ -195,16 +197,19 @@ question. Every authenticated request also renews the device lease.
 | Database calls (PostgREST/RPC) | ~250–300/s steady |
 | Burst when a per-question timer expires for everyone at once (scheduled start) | ~1,600 calls within a few seconds, once per question |
 | Burst at the scheduled start | 400 attempt creations within ~8 s (waiting-room poll interval) |
-| Admin Live Students / Violations pages | every 10–15 s, each poll pages through **all** sessions and events; cost grows during the exam |
+| Admin Live Students / Violations pages | Live Students fetches compact event summaries for the displayed session page; Violations loads history initially, then polls only events after its timestamp cursor |
 
 Recommendations:
 
 - Use **at least the Small compute add-on** on the exam Supabase project (Medium to be
   safe) and check the API connection-pool settings. Watch the Supabase
   dashboard (CPU, connections, API latency) during the rehearsal.
-- **Run a load test** on staging with ~400 simulated students (e.g. k6 against
-  login → start → answer → submit), including a synchronized question timeout.
-  This has **not** been done as part of the audit.
+- **Run the controlled staging-only rehearsal** in
+  [`STAGING_CHECKLIST.md` §10](../STAGING_CHECKLIST.md#10-controlled-staging-load-rehearsal-400-students)
+  with ~400 isolated test students through login → preflight → start → answer
+  → submit, including a synchronized question timeout. This has **not** been
+  run or passed; capacity remains unverified until measured results are
+  recorded and reviewed.
 - Keep the number of admins on Live Students / Violations during the exam small (2–3).
 - One Node instance handles this load. Two instances give failover.
 
@@ -221,4 +226,5 @@ Recommendations:
 
 See [`STAGING_CHECKLIST.md` §8](../STAGING_CHECKLIST.md#8-rollback-procedure). In
 short: keep the previous backend build and both previous `dist/` folders. Roll back
-the application first. Migrations 001–019 are additive and stay in place.
+the application first and leave applied migrations in place; the historical
+migration set is not uniformly safe to replay or roll back on populated data.

@@ -17,6 +17,10 @@ const SummaryPage = () => {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
 
+  useEffect(() => {
+    if (submitted) navigate('/success', { replace: true });
+  }, [submitted, navigate]);
+
   // A fresh page load (e.g. a refresh landing directly on /summary) starts
   // with an empty ExamContext — reload the session from the backend
   // rather than assuming the student already finished every question.

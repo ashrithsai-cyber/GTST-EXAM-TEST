@@ -41,16 +41,22 @@ const ExamProctoringRulesPage = () => {
   const { student, token } = useContext(AuthContext);
   const { completeProctoringRules, resetSystemCheck, examSettings, settingsLoaded } = useContext(SystemCheckContext);
 
-  const [fullscreenExited, setFullscreenExited] = useState(false);
+
   const videoRef = useRef(null);
   const [videoSrc, setVideoSrc] = useState(null);
   const [videoLoading, setVideoLoading] = useState(true);
-  const [videoError, setVideoError] = useState(false);
+  const [videoError, setVideoError] = useState('');
+  const [videoRetry, setVideoRetry] = useState(0);
   const [videoCompleted, setVideoCompleted] = useState(false);
   const [videoTime, setVideoTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
-  const [needsPlayClick, setNeedsPlayClick] = useState(false);
+  const [needsPlayClick, setNeedsPlayClick] = useState(true);
   const maxWatchedTimeRef = useRef(0);
+  const bufferingTimer = useRef(null);
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
+  const hasToken = Boolean(token);
+  const registrationId = student?.registrationId;
 
   // The rules students must acknowledge — admin-managed (Admin >
   // Proctoring Rules). Starts as the bundled fallback and is replaced by
@@ -64,11 +70,16 @@ const ExamProctoringRulesPage = () => {
   }, [student, navigate]);
 
   useEffect(() => {
-    if (!token) return undefined;
+    if (!hasToken) return undefined;
     let cancelled = false;
     setVideoLoading(true);
-    setVideoError(false);
-    fetchMockVideo(token)
+    setVideoError('');
+    setVideoCompleted(false);
+    setNeedsPlayClick(true);
+    setVideoTime(0);
+    setVideoDuration(0);
+    maxWatchedTimeRef.current = 0;
+    fetchMockVideo(tokenRef.current)
       .then((res) => {
         if (cancelled) return;
         setVideoSrc(res?.video?.url || null);
@@ -76,14 +87,24 @@ const ExamProctoringRulesPage = () => {
       .catch(() => {
         if (!cancelled) {
           setVideoSrc(null);
-          setVideoError(true);
+          setVideoError('Unable to load the instruction video. Check your connection and retry.');
         }
       })
       .finally(() => {
         if (!cancelled) setVideoLoading(false);
       });
     return () => { cancelled = true; };
-  }, [token]);
+  }, [hasToken, registrationId, videoRetry]);
+
+  useEffect(() => () => clearTimeout(bufferingTimer.current), []);
+  const clearBuffering = () => clearTimeout(bufferingTimer.current);
+  const handleBuffering = () => {
+    clearBuffering();
+    bufferingTimer.current = setTimeout(() => {
+      setVideoError('The video stopped loading. Check your connection and retry the video.');
+      setVideoCompleted(false);
+    }, 20000);
+  };
 
   useEffect(() => {
     if (!token) return;
@@ -112,29 +133,6 @@ const ExamProctoringRulesPage = () => {
     return () => clearInterval(interval);
   }, [student, token]);
 
-  useEffect(() => {
-    if (!settingsLoaded || !examSettings.fullscreenRequired) return undefined;
-    document.documentElement.requestFullscreen?.().catch(() => {});
-    return undefined;
-  }, [examSettings.fullscreenRequired, settingsLoaded]);
-
-  useEffect(() => {
-    if (!settingsLoaded || !examSettings.fullscreenRequired) {
-      setFullscreenExited(false);
-      return undefined;
-    }
-    const handleFullscreenChange = () => {
-      setFullscreenExited(!document.fullscreenElement);
-    };
-    handleFullscreenChange();
-    document.addEventListener("fullscreenchange", handleFullscreenChange);
-    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
-  }, [examSettings.fullscreenRequired, settingsLoaded]);
-
-  const handleReturnToFullscreen = () => {
-    document.documentElement.requestFullscreen?.().catch(() => {});
-  };
-
   // Plays with sound. Browsers may refuse unmuted autoplay when the page
   // has had no user interaction yet (e.g. after a reload) — then a
   // "Play with sound" button is shown and the student's click starts it.
@@ -145,7 +143,10 @@ const ExamProctoringRulesPage = () => {
     video.play()
       .then(() => setNeedsPlayClick(false))
       .catch((error) => {
-        if (error?.name === "NotAllowedError") setNeedsPlayClick(true);
+        setNeedsPlayClick(true);
+        if (error?.name !== 'NotAllowedError' && error?.name !== 'AbortError') {
+          setVideoError('This browser could not play the video. Retry in a supported browser, or contact the administrator for a compatible MP4 (H.264/AAC) video.');
+        }
       });
   };
 
@@ -183,13 +184,11 @@ const ExamProctoringRulesPage = () => {
     maxWatchedTimeRef.current = video.duration;
     setVideoTime(video.duration);
     setVideoCompleted(true);
+    clearBuffering();
   };
 
-  // The video gate only applies when the admin requires it AND a video
-  // actually exists and plays. A missing or broken video must never lock
-  // a student out of the exam.
-  const videoGateActive = examSettings.videoRequired && Boolean(videoSrc) && !videoError;
-  const canContinue = !videoLoading && (!videoGateActive || videoCompleted);
+  const videoGateActive = examSettings.videoRequired;
+  const canContinue = settingsLoaded && !videoLoading && (!videoGateActive || (Boolean(videoSrc) && !videoError && videoCompleted));
 
   // Rules acceptance is recorded server-side — the exam can't be started
   // without it — so only continue once the backend has confirmed it.
@@ -230,8 +229,8 @@ const ExamProctoringRulesPage = () => {
 
         {/* Video on the left, rules on the right; stacked (video first) on
             narrow screens. Without any video the rules use the full width. */}
-        <div className={`rules-layout ${videoSrc || videoLoading || videoError ? "" : "rules-layout-single"}`}>
-          {(videoSrc || videoLoading || videoError) && (
+        <div className={`rules-layout ${videoSrc || videoLoading || videoError || videoGateActive ? "" : "rules-layout-single"}`}>
+          {(videoSrc || videoLoading || videoError || videoGateActive) && (
           <div className="rules-video-col">
           {videoSrc && (
             <div className="card sysreq-card">
@@ -241,12 +240,13 @@ const ExamProctoringRulesPage = () => {
               </p>
               <div className="proctoring-video-wrap">
                 <video
+                  key={videoRetry}
                   ref={videoRef}
                   src={videoSrc}
                   playsInline
                   preload="metadata"
                   className="proctoring-video"
-                  controls={false}
+                  controls
                   controlsList="nodownload noplaybackrate nofullscreen"
                   disablePictureInPicture
                   onLoadedMetadata={(event) => setVideoDuration(event.currentTarget.duration)}
@@ -254,14 +254,15 @@ const ExamProctoringRulesPage = () => {
                   onTimeUpdate={handleVideoTimeUpdate}
                   onSeeking={handleVideoSeeking}
                   onRateChange={handleVideoRateChange}
-                  onPause={(event) => {
-                    if (!event.currentTarget.ended) playVideo();
-                  }}
-                  onLoadedData={playVideo}
+                  onPause={() => { setNeedsPlayClick(true); clearBuffering(); }}
+                  onPlaying={() => { setNeedsPlayClick(false); clearBuffering(); }}
+                  onWaiting={handleBuffering}
+                  onStalled={handleBuffering}
+                  onLoadedData={clearBuffering}
                   onEnded={handleVideoEnded}
-                  onError={() => setVideoError(true)}
+                  onError={() => { clearBuffering(); setVideoCompleted(false); setVideoError('This video could not be played. Retry, open the exam in a supported browser, or contact the administrator for a compatible MP4 (H.264/AAC) video.'); }}
                 />
-                {needsPlayClick && !videoCompleted && (
+                {needsPlayClick && !videoCompleted && !videoError && (
                   <button type="button" className="proctoring-video-play" onClick={playVideo}>
                     <span className="play-ic" aria-hidden="true">▶</span>
                     {videoTime > 0 ? "Resume video with sound" : "Play video with sound"}
@@ -301,8 +302,17 @@ const ExamProctoringRulesPage = () => {
             </div>
           )}
           {videoLoading && <p className="sysreq-hint">Loading administrator video…</p>}
-          {!videoLoading && videoError && (
-            <p className="error-state">The instruction video could not be loaded. Please read the rules carefully before continuing.</p>
+          {!videoLoading && (videoError || (videoGateActive && !videoSrc)) && (
+            <div className="error-state" role="alert">
+              <p>{videoError || 'The required instruction video is unavailable. Contact the administrator or retry.'}</p>
+              <button className="btn btn-primary" onClick={() => {
+                clearBuffering();
+                setVideoSrc(null);
+                setVideoError('');
+                setVideoCompleted(false);
+                setVideoRetry(count => count + 1);
+              }}>Retry Video</button>
+            </div>
           )}
           </div>
           )}
@@ -345,19 +355,6 @@ const ExamProctoringRulesPage = () => {
           </div>
         </div>
       </div>
-
-      {settingsLoaded && examSettings.fullscreenRequired && fullscreenExited && (
-        <div className="overlay">
-          <div className="modal-card" style={{ textAlign: "center" }}>
-            <div className="icon-circle danger">⚠</div>
-            <h3>Full-Screen Mode Required</h3>
-            <p>You have exited full-screen mode. You must return to full-screen mode to continue.</p>
-            <div className="modal-actions" style={{ justifyContent: "center" }}>
-              <button className="btn btn-primary" onClick={handleReturnToFullscreen}>Return to Full Screen</button>
-            </div>
-          </div>
-        </div>
-      )}
 
       <Footer />
     </>

@@ -249,6 +249,14 @@ async function checkPreflightForSessionStart(candidateId, examId) {
     // admin's requirement toggles are read fresh, and the photo must
     // still exist in storage metadata.
     const settings = await getExamSettings();
+    const changed = [
+        [settings.cameraRequired, row.camera_check],
+        [settings.microphoneRequired, row.microphone_check],
+        [settings.fullscreenRequired, row.fullscreen_check],
+        [settings.faceDetectionEnabled, row.face_check]
+    ].some(([required, passed]) => required && !passed);
+    if (changed) return { status: 403, body: { success: false, code: "PREFLIGHT_REQUIRED",
+        message: "Exam requirements changed. Please complete the system check again." } };
     if (settings.photoCaptureEnabled && !(await getScreenshotCapturedAt(candidateId, examId))) {
         return { status: 403, body: { success: false, code: "PREFLIGHT_REQUIRED", message: PREFLIGHT_REQUIRED_MESSAGE } };
     }

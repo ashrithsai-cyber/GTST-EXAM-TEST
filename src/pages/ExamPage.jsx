@@ -4,9 +4,9 @@ import { AuthContext } from '../context/AuthContext';
 import { ExamContext } from '../context/ExamContext';
 import { SystemCheckContext } from '../context/SystemCheckContext';
 import { BrandingContext } from '../context/BrandingContext';
-import { useMicrophone } from '../hooks/useMicrophone';
 import { useFaceDetection } from '../hooks/useFaceDetection';
-import { recordPresence, recordProctoringEvent } from '../services/examService';
+import { recordPresence } from '../services/examService';
+import { MonitoringContext } from '../context/MonitoringContext';
 import Header from '../components/common/Header';
 import Footer from '../components/common/Footer';
 import ExamWaitingRoom from '../components/common/ExamWaitingRoom';
@@ -57,7 +57,8 @@ function safeUserError(error, fallback) {
 const ExamPage = () => {
   const navigate = useNavigate();
   const { student, token } = useContext(AuthContext);
-  const { examSettings, settingsLoaded, camera, resetSystemCheck } = useContext(SystemCheckContext);
+  const { examSettings, settingsLoaded, camera, microphone, fullscreen, resetSystemCheck } = useContext(SystemCheckContext);
+  const { reportEvent: queueEvent } = useContext(MonitoringContext);
   const { logoUrl } = useContext(BrandingContext);
   const {
     sessionId, examMeta, subjectsMeta, currentQuestion,
@@ -71,7 +72,6 @@ const ExamPage = () => {
     answers, finalizeSubmission,
   } = useContext(ExamContext);
 
-  const microphone = useMicrophone({ enabled: settingsLoaded && examSettings.microphoneRequired });
   const face = useFaceDetection(camera.videoRef, camera.ready && examSettings.faceDetectionEnabled);
 
   useEffect(() => {
@@ -96,19 +96,26 @@ const ExamPage = () => {
   // below retry once the connection returns (the timer stays at 0 then).
   const [autoAdvanceRetry, setAutoAdvanceRetry] = useState(0);
   const lastFocusLossRef = useRef(0);
+  const initializedForRef = useRef(null);
 
   useEffect(() => {
     if (!student) {
+      initializedForRef.current = null;
       navigate('/');
       return;
     }
+    if (!settingsLoaded || (examSettings.fullscreenRequired && !fullscreen.isFullscreen)
+      || (examSettings.cameraRequired && !camera.ready) || (examSettings.microphoneRequired && !microphone.ready)) return;
+    if (initializedForRef.current === student.registrationId) return;
+    initializedForRef.current = student.registrationId;
     initExam().then((res) => {
       if (res.success && res.examComplete) {
         navigate(res.submitted ? '/success' : '/summary', { replace: true });
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [student]);
+  }, [student, settingsLoaded, examSettings.fullscreenRequired, fullscreen.isFullscreen,
+    examSettings.cameraRequired, camera.ready, examSettings.microphoneRequired, microphone.ready]);
 
   useEffect(() => {
     if (!student || !token || !sessionId) return undefined;
@@ -149,9 +156,9 @@ const ExamPage = () => {
   // Resolves with the backend's response (recorded, violation,
   // violationCount), or null if the request failed.
   const reportEventDetails = useCallback(async (eventType, eventMessage) => {
-    if (!sessionId) return null;
+    if (!sessionId || submitted) return null;
     try {
-      return await recordProctoringEvent(token, { sessionId, eventType, eventMessage });
+      return await queueEvent(eventType, eventMessage);
     } catch (error) {
       // This event was the one that hit (or already was past) the
       // proctoring warning limit — the backend has blocked the session.
@@ -163,30 +170,31 @@ const ExamPage = () => {
         setViolation(null);
         setExamInitError({ message: safeUserError(error, 'The examination has been blocked.'), status: error.status,
           data: error.data });
+        return { blocked: true };
       }
       return null;
     }
-  }, [sessionId, token]);
+  }, [sessionId, submitted, queueEvent]);
   const reportEvent = useCallback(async (eventType, eventMessage) => {
     const response = await reportEventDetails(eventType, eventMessage);
     return !!response && response.recorded !== false;
   }, [reportEventDetails]);
 
-  // Reports a violation and, once the backend has confirmed it was
-  // recorded, shows the violation popup. Violations are captured only —
-  // there is no warning limit and nothing is blocked. If it wasn't recorded (check disabled in Exam Settings, or the
-  // request failed) the popup would be a false claim, so the plain
-  // banner is shown instead.
-  // Resolves true when the popup was shown.
-  const reportViolation = useCallback(async (eventType, eventMessage, fallbackText) => {
-    const response = await reportEventDetails(eventType, eventMessage);
-    if (response && response.recorded !== false) {
-      setViolation({ id: Date.now(), eventType });
-      return true;
-    }
-    if (fallbackText) addBanner('danger', fallbackText, 5000);
-    return false;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  // Show every detected violation in the modal immediately; its save state
+  // changes once the server acknowledges it or confirms recording is disabled.
+  const reportViolation = useCallback((eventType, eventMessage) => {
+    const id = Date.now() + Math.random();
+    setViolation({ id, eventType, saveState: 'saving' });
+    void reportEventDetails(eventType, eventMessage).then((response) => {
+      if (response?.blocked) {
+        setViolation((current) => current?.id === id ? null : current);
+        return;
+      }
+      const saveState = response?.recorded === false ? 'not-recorded'
+        : response?.recorded ? 'recorded' : 'pending';
+      setViolation((current) => current?.id === id ? { ...current, saveState } : current);
+    });
+    return true;
   }, [reportEventDetails]);
 
   // Reports a focus-loss style event (tab switch / window blur /
@@ -208,7 +216,9 @@ const ExamPage = () => {
 
   const selectOption = (optIdx) => {
     if (advancingRef.current || !q || timeLeft <= 0 || examTimeLeft === 0) return;
+    if (examSettings.fullscreenRequired && !fullscreen.isFullscreen) return;
     setAns(q.id, { sel: optIdx });
+    setNoAnswerMessage(false);
     saveAnswerDraft(q.id, ['A', 'B', 'C', 'D'][optIdx]).catch((error) => {
       addBanner('danger', safeUserError(error, 'Unable to save your answer. Please retry.'), 4000);
     });
@@ -216,6 +226,7 @@ const ExamPage = () => {
 
   const clearResponse = () => {
     if (!q || advancingRef.current || timeLeft <= 0 || examTimeLeft === 0) return;
+    if (examSettings.fullscreenRequired && !fullscreen.isFullscreen) return;
     setAns(q.id, { sel: null });
     saveAnswerDraft(q.id, null).catch((error) => addBanner('danger', safeUserError(error, 'Unable to clear your response. Please retry.'), 4000));
   };
@@ -228,8 +239,9 @@ const ExamPage = () => {
   // the student able to retry rather than silently losing the answer.
   // The "Answer Saved" toast only appears once this backend call has
   // actually succeeded — never optimistically on selection.
-  const goNext = async () => {
+  const goNext = async (automatic = false) => {
     if (advancingRef.current) return;
+    if (!automatic && examSettings.fullscreenRequired && !fullscreen.isFullscreen) return;
     advancingRef.current = true;
     setIsAdvancing(true);
 
@@ -309,9 +321,7 @@ const ExamPage = () => {
   // selected when the question first rendered.
   goNextRef.current = goNext;
 
-  // "No answer selected" warning, shown when Next is clicked with no
-  // option chosen. Timer-driven advances never ask.
-  const [noAnswerConfirmOpen, setNoAnswerConfirmOpen] = useState(false);
+  const [noAnswerMessage, setNoAnswerMessage] = useState(false);
 
   const currentQuestionId = q?.id;
   useEffect(() => {
@@ -319,7 +329,7 @@ const ExamPage = () => {
     advancingRef.current = false;
     setIsAdvancing(false);
     // The question moved on (e.g. its timer ran out) — the warning no longer applies.
-    setNoAnswerConfirmOpen(false);
+    setNoAnswerMessage(false);
   }, [currentQuestionId]);
 
   // The context anchors these countdowns to the server using performance.now.
@@ -330,13 +340,13 @@ const ExamPage = () => {
     if (!examReady || !isOnline || timeLeft > 0 || !currentQuestionId) return;
     if (expiredQuestionIdRef.current === currentQuestionId) return;
     expiredQuestionIdRef.current = currentQuestionId;
-    goNextRef.current();
+    goNextRef.current(true);
   }, [examReady, isOnline, timeLeft, currentQuestionId, autoAdvanceRetry]);
 
   useEffect(() => {
     if (examReady && isOnline && examTimeLeft === 0 && !examDeadlineHandledRef.current) {
       examDeadlineHandledRef.current = true;
-      goNextRef.current();
+      goNextRef.current(true);
     } else if (examTimeLeft !== null && examTimeLeft > 0) {
       examDeadlineHandledRef.current = false;
     }
@@ -349,14 +359,11 @@ const ExamPage = () => {
   // Browsers only honour this during a user gesture; when it's refused
   // (e.g. after a page refresh) the "Return to Full Screen" overlay below
   // gives the student a button to do it.
-  const enterFullscreen = () => {
-    document.documentElement.requestFullscreen?.().catch(() => {});
-  };
+  const enterFullscreen = fullscreen.enterFullscreen;
 
   // Tab switch — reports to the backend and only claims "recorded" once
   // that call actually succeeds.
   useEffect(() => {
-    if (settingsLoaded && examSettings.fullscreenRequired) enterFullscreen();
     const handleVisibility = () => {
       if (document.hidden) {
         reportFocusLoss('TAB_SWITCH', 'Student switched away from the exam tab.', '⚠ You switched away from the exam window.');
@@ -385,7 +392,7 @@ const ExamPage = () => {
   // after a refresh, just shows the overlay — refreshing is a supported
   // recovery path, not a violation.
   useEffect(() => {
-    const isExited = () => settingsLoaded && examSettings.fullscreenRequired && !document.fullscreenElement;
+    const isExited = () => settingsLoaded && examSettings.fullscreenRequired && !(document.fullscreenElement || document.webkitFullscreenElement);
     setFullscreenExited(isExited());
     const handleFullscreenChange = () => {
       const exited = isExited();
@@ -395,7 +402,8 @@ const ExamPage = () => {
       }
     };
     document.addEventListener('fullscreenchange', handleFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    return () => { document.removeEventListener('fullscreenchange', handleFullscreenChange); document.removeEventListener('webkitfullscreenchange', handleFullscreenChange); };
   }, [reportFocusLoss, examSettings.fullscreenRequired, settingsLoaded]);
 
   // Right-click and copy/cut/paste are blocked while a question is on
@@ -460,6 +468,7 @@ const ExamPage = () => {
     const handleOffline = () => {
       setIsOnline(false);
       disconnectedAtRef.current = Date.now();
+      void reportEvent('NETWORK_DISCONNECT', 'Network connection lost.');
       addBanner('offline', '📡 Connection lost. Attempting to reconnect — your last saved answer is safe.', null);
     };
     const handleOnline = () => {
@@ -515,12 +524,12 @@ const ExamPage = () => {
     if (!examSettings.microphoneRequired) return;
     if (micReady) {
       micWasReadyRef.current = true;
-    } else if (micWasReadyRef.current) {
+    } else if (micWasReadyRef.current && !microphone.needsActivation) {
       micWasReadyRef.current = false;
       reportViolation('MICROPHONE_DISABLED', microphone.error || 'Microphone became unavailable during the exam.', '⚠ A microphone issue was detected.');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [micReady, reportViolation, examSettings.microphoneRequired]);
+  }, [micReady, reportViolation, examSettings.microphoneRequired, microphone.needsActivation]);
 
   // A device that stays open but delivers only digital zeros (hardware
   // mute switch, failed driver) is a microphone failure too. Quiet rooms
@@ -609,7 +618,6 @@ const ExamPage = () => {
     return () => clearTimeout(timer);
   }, [multipleActive, popupOpen, multipleRetry, face.faceState, reportViolation]);
 
-  const handleReturnToFullscreen = enterFullscreen;
 
   // Review is read-only: the sequence stays forward-only, so it shows
   // status without offering a way back to earlier questions.
@@ -624,6 +632,7 @@ const ExamPage = () => {
   // auto-advance from racing it.
   const handleSubmitExam = async () => {
     if (submitting || advancingRef.current) return;
+    if (examSettings.fullscreenRequired && !fullscreen.isFullscreen) return;
     advancingRef.current = true;
     setSubmitting(true);
     setSubmitError('');
@@ -729,7 +738,8 @@ const ExamPage = () => {
   const currentOverallNumber = q.sequenceNumber || (position >= 0 ? position + 1 : 1);
   const completedCount = Math.max(0, currentOverallNumber - 1);
   const progressPercent = totalQuestions ? Math.round((completedCount / totalQuestions) * 100) : 0;
-  const answerDisabled = isAdvancing || timeLeft <= 0 || examTimeLeft === 0;
+  const answerDisabled = isAdvancing || submitting || timeLeft <= 0 || examTimeLeft === 0
+    || !settingsLoaded || (examSettings.fullscreenRequired && !fullscreen.isFullscreen);
   const draftMessage = { idle: 'Choose one answer.', saving: 'Saving answer…', saved: 'Answer saved.',
     pending: 'Answer pending. Reconnect to save.', error: 'Answer could not be saved. Select again or retry Next.' }[draftStatus];
 
@@ -806,6 +816,29 @@ const ExamPage = () => {
             </div>
             <div className="student-mini"><b>{student.name}</b><span>{student.registrationId}</span></div>
           </div>
+          {examSettings.cameraRequired && (
+            <div className={`camera-preview exam-camera-preview ${camera.ready ? 'face-ok' : ''}`}>
+              <video
+                ref={(video) => {
+                  camera.videoRef.current = video;
+                  if (video && camera.stream && video.srcObject !== camera.stream) {
+                    video.srcObject = camera.stream;
+                    video.play().catch(() => {});
+                  }
+                }}
+                autoPlay
+                playsInline
+                muted
+                aria-label="Your live camera feed"
+                className="video-preview"
+                onLoadedMetadata={(event) => event.currentTarget.play().catch(() => {})}
+                onCanPlay={(event) => event.currentTarget.play().catch(() => {})}
+              />
+              <span className="camera-preview-label" role="status">
+                {camera.ready ? 'Camera live' : camera.error ? 'Camera issue' : 'Connecting…'}
+              </span>
+            </div>
+          )}
         </header>
         <div className="exam-body">
           {/* Status only — the sequence is forward-only, so the numbers
@@ -857,6 +890,7 @@ const ExamPage = () => {
               ))}
             </div>
             <p className={`answer-save-status ${draftStatus}`} role="status">{draftMessage}</p>
+            {noAnswerMessage && <p className="unanswered-message" role="status">Choose an answer, or use Skip to leave this question unanswered.</p>}
             <div className="exam-actions-row">
               <button type="button" className="btn btn-secondary btn-sm" disabled={answerDisabled || ans.sel === null} onClick={clearResponse}>Clear answer</button>
               <div className="exam-actions-right">
@@ -865,7 +899,7 @@ const ExamPage = () => {
                 <button type="button" className="btn btn-skip" disabled={isAdvancing || submitting || !isOnline || ans.sel !== null}
                   title={ans.sel !== null ? 'Clear your answer to skip this question' : undefined} onClick={() => goNext()}>Skip</button>
                 <button type="button" className="btn btn-primary" disabled={isAdvancing || submitting || !isOnline}
-                  onClick={() => (ans.sel === null ? setNoAnswerConfirmOpen(true) : goNext())}>
+                  onClick={() => (ans.sel === null ? setNoAnswerMessage(true) : goNext())}>
                   {isAdvancing ? 'Saving…' : currentOverallNumber === totalQuestions ? 'Save & Submit' : 'Next'}
                 </button>
               </div>
@@ -887,32 +921,6 @@ const ExamPage = () => {
           <div className="card nav-panel exam-proctor-panel">
             <h4>Proctoring Monitor</h4>
 
-            <div className={`camera-preview exam-camera-preview ${camera.ready ? 'face-ok' : ''}`}>
-              <video
-                ref={(video) => {
-                  camera.videoRef.current = video;
-                  // Runs on every render; re-assigning the same stream
-                  // reloads the element and makes the preview flicker.
-                  if (video && camera.stream && video.srcObject !== camera.stream) {
-                    video.srcObject = camera.stream;
-                    video.play().catch(() => {});
-                  }
-                }}
-                autoPlay
-                playsInline
-                muted
-                aria-label="Your live camera feed"
-                className="video-preview"
-                onLoadedMetadata={(event) => event.currentTarget.play().catch(() => {})}
-                onCanPlay={(event) => event.currentTarget.play().catch(() => {})}
-              />
-              {camera.error && (
-                <div className="exam-camera-error" role="alert">
-                  <strong>Camera Access Error</strong>
-                  <span>{camera.error}</span>
-                </div>
-              )}
-            </div>
             {camera.error ? (
               <div className="error-state" style={{ padding: '10px', fontSize: '11.5px' }}>
                 <p style={{ marginBottom: '8px' }}>{camera.error}</p>
@@ -930,6 +938,7 @@ const ExamPage = () => {
             )}
 
             <div className="exam-mic-status">
+              {microphone.needsActivation && <button className="btn btn-primary btn-sm" onClick={microphone.resume}>Resume Microphone Monitoring</button>}
               <div className="sysreq-check-title" style={{ fontSize: '12.5px', marginBottom: '6px' }}>
                 <span className="ic">🎤</span> Microphone
               </div>
@@ -987,19 +996,6 @@ const ExamPage = () => {
         </div>
       </main>
 
-      {settingsLoaded && examSettings.fullscreenRequired && fullscreenExited && !submitted && !violation && (
-        <div className="overlay">
-          <div className="modal-card" style={{ textAlign: 'center' }}>
-            <div className="icon-circle danger">⚠</div>
-            <h3>Full-Screen Mode Required</h3>
-            <p>You have exited full-screen mode. You must return to full-screen mode to continue your examination.</p>
-            <div className="modal-actions" style={{ justifyContent: 'center' }}>
-              <button className="btn btn-primary" onClick={handleReturnToFullscreen}>Return to Full Screen</button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {violation && (() => {
         const details = violationDetails(violation.eventType);
         const isFullscreenExit = violation.eventType === 'FULLSCREEN_EXIT' && fullscreenExited;
@@ -1012,12 +1008,18 @@ const ExamPage = () => {
             <div className="modal-card violation-card" key={violation.id}>
               <div className="violation-head">
                 <div className="icon-circle danger">⚠</div>
-                <span className="violation-count">Violation Recorded</span>
+                <span className="violation-count">{violation.saveState === 'recorded' ? 'Violation Recorded' : 'Violation Detected'}</span>
               </div>
               <h3 id="violation-title">{details.title}</h3>
               <p id="violation-reason">{details.reason}</p>
               <p className="violation-note">
-                This violation has been recorded and will be reviewed by the exam administrator.
+                {violation.saveState === 'recorded'
+                  ? 'This violation has been recorded and will be reviewed by the exam administrator.'
+                  : violation.saveState === 'saving'
+                    ? 'Saving this warning to the exam record…'
+                    : violation.saveState === 'not-recorded'
+                      ? 'This activity was detected, but recording is disabled for this check in the exam settings.'
+                      : 'The warning is shown, but saving could not be confirmed. It will retry when the connection is restored; keep the exam page open.'}
               </p>
               <div className="modal-actions" style={{ justifyContent: 'center' }}>
                 <button type="button" className="btn btn-primary" autoFocus onClick={acknowledge}>
@@ -1090,25 +1092,6 @@ const ExamPage = () => {
               <button type="button" className="btn btn-secondary" disabled={submitting} onClick={() => setSubmitConfirmOpen(false)}>Cancel</button>
               <button type="button" className="btn btn-success" disabled={submitting || !isOnline} onClick={handleSubmitExam}>
                 {submitting ? 'Submitting…' : 'Confirm Submission'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {noAnswerConfirmOpen && (
-        <div className="overlay" role="alertdialog" aria-modal="true" aria-labelledby="no-answer-title">
-          <div className="modal-card" style={{ textAlign: 'center' }}>
-            <div className="icon-circle warning">!</div>
-            <h3 id="no-answer-title">No answer is selected. Do you want to continue?</h3>
-            <p>Go back to choose an answer, or continue to leave this question unanswered.</p>
-            <div className="modal-actions" style={{ justifyContent: 'center' }}>
-              <button type="button" className="btn btn-secondary" autoFocus onClick={() => setNoAnswerConfirmOpen(false)}>
-                Go Back
-              </button>
-              <button type="button" className="btn btn-primary" disabled={isAdvancing || submitting || !isOnline}
-                onClick={() => { setNoAnswerConfirmOpen(false); goNext(); }}>
-                Continue
               </button>
             </div>
           </div>

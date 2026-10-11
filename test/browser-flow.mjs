@@ -22,11 +22,14 @@ const questions = [303, 101, 202].map((id, index) => ({
 }));
 const subject = { subjectId: 9, subjectKey: 'MATHEMATICS', subjectName: 'Mathematics', questionCount: questions.length, displayOrder: 1, durationSeconds: 180 };
 const settings = { cameraRequired: false, photoCaptureEnabled: false, microphoneRequired: true,
+  screenSharingRequired: true,
   fullscreenRequired: false, proctoringEnabled: false, faceDetectionEnabled: false, videoRequired: false,
   networkMonitoringEnabled: true, tabSwitchMonitoringEnabled: false };
 // 'devices' requires camera, check-in photo and fullscreen through Chrome's
 // fake capture device; 'offline' uses a short question timer.
 function settingsFor(state) {
+  if (state.name === 'video') return { ...settings, videoRequired: true };
+  if (state.name === 'offline-event') return { ...settings, proctoringEnabled: true, tabSwitchMonitoringEnabled: true };
   return state.name === 'devices' ? { ...settings, cameraRequired: true, photoCaptureEnabled: true, fullscreenRequired: true } : settings;
 }
 const questionSeconds = (state) => (state.name === 'offline' ? 4 : 60);
@@ -75,7 +78,7 @@ const server = createServer(async (request, response) => {
       case '/api/exam/settings': result = { settings: settingsFor(state) }; break;
       case '/api/exam/system-check/screenshot': state.photoUploaded = true; result = { success: true, captured: true }; break;
       case '/api/exam/info': result = { success: true, exam, subjects: [subject], attempt: state.startedAt ? { status: state.submittedAt ? 'SUBMITTED' : 'IN_PROGRESS', submittedAt: state.submittedAt } : null }; break;
-      case '/api/exam/mock-video': result = { video: null }; break;
+      case '/api/exam/mock-video': result = { video: state.videoURL ? { url: state.videoURL } : null }; break;
       case '/api/exam/rules': result = { rules: [{ id: 1, text: 'Read and accept the test fixture examination rules.' }] }; break;
       case '/api/exam/preflight/system-check':
         assert.equal(body.microphone, true);
@@ -102,7 +105,7 @@ const server = createServer(async (request, response) => {
         // Only the 'violations' case records events, like the real backend
         // (capture only: no limit, never blocks); every other case has
         // proctoring off.
-        if (state.name !== 'violations') { result = { success: true, recorded: false }; break; }
+        if (!['violations', 'offline-event'].includes(state.name)) { result = { success: true, recorded: false }; break; }
         state.violations = (state.violations || 0) + 1;
         result = { success: true, recorded: true, violation: true, violationCount: state.violations, blocked: false }; break;
       case '/api/exam/result': result = { success: true, submitted: Boolean(state.submittedAt), published: false, completion: state.submittedAt ? { submittedAt: state.submittedAt, totalQuestions: questions.length, attemptedQuestions: [...state.answers.values()].filter(Boolean).length, examName: exam.examName } : null }; break;
@@ -160,6 +163,8 @@ try {
         if (url.pathname.startsWith('/api/')) {
           if (window.__smokeOffline) return Promise.reject(new TypeError('Failed to fetch'));
           if (window.__smokeDropNextDraft && url.pathname === '/api/exam/answers/draft') { window.__smokeDropNextDraft = false; return Promise.reject(new TypeError('Failed to fetch')); }
+          if (window.__smokeDropDrafts && url.pathname === '/api/exam/answers/draft') return Promise.reject(new TypeError('Failed to fetch'));
+          if (window.__smokeDropEvents && url.pathname === '/api/exam/proctoring/event') return Promise.reject(new TypeError('Failed to fetch'));
           return realFetch(location.origin + url.pathname + url.search, { ...init, headers: { ...init.headers, 'X-Smoke-Case': window.__smokeCase } });
         }
         return realFetch(input, init);
@@ -169,6 +174,8 @@ try {
       window.AudioContext = class extends NativeAudioContext { constructor(...args) { super(...args); window.__smokeContexts.push(this); } };
       let sourceContext, gain, destination;
       const realGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+      window.__smokeDisplayRequests = 0;
+      navigator.mediaDevices.getDisplayMedia = async () => { window.__smokeDisplayRequests += 1; throw new Error('Screen capture must not be requested'); };
       navigator.mediaDevices.getUserMedia = async (constraints) => {
         if (constraints.video && !constraints.audio && window.__smokeCase === 'devices') return realGetUserMedia(constraints);
         if (!constraints.audio) throw new Error('This smoke fixture enables microphone only');
@@ -207,7 +214,7 @@ try {
     };
     return { sessionId, evaluate, wait, click, login, reload };
   }
-  async function enterExam(p) {
+  async function enterExam(p, rulesOnly = false) {
     await p.login(); await p.wait('location.pathname === "/student-confirm"', 'student confirmation'); await p.click('Continue to Dashboard');
     await p.wait('location.pathname === "/dashboard"', 'dashboard'); await p.evaluate('document.querySelector("input[type=checkbox]").click()'); await p.click('Start Examination');
     await p.wait('location.pathname === "/system-check" && !!document.querySelector("[role=meter]")', 'microphone system check');
@@ -222,11 +229,17 @@ try {
       await p.wait('!!document.querySelector("video") && document.querySelector("video").readyState >= 2', 'fake camera frames');
       await p.click('Enter Fullscreen'); await p.wait('!!document.fullscreenElement', 'fullscreen entered');
     }
-    await p.click('I Agree'); await p.click('Start Exam'); await p.wait('location.pathname === "/proctoring-rules"', 'rules'); await p.click('Continue to Exam');
+    await p.click('I Agree'); await p.click('Start Exam'); await p.wait('location.pathname === "/proctoring-rules"', 'rules');
+    if (rulesOnly) return;
+    await p.click('Continue to Exam');
     await p.wait('!!document.querySelector("#active-question")', 'first question');
   }
   const normal = await page('normal'); await enterExam(normal);
   assert.equal(await normal.evaluate('document.querySelector("#active-question").textContent'), questions[0].questionText);
+  assert.equal(await normal.evaluate('window.__smokeDisplayRequests'), 0, 'legacy screen-sharing setting must not request capture');
+  const systemCheckRequest = requests.find(r => r.case === 'normal' && r.path === '/api/exam/preflight/system-check');
+  assert.equal(systemCheckRequest.body.screenSharing, undefined);
+  assert.equal(systemCheckRequest.body.screenSharingSupported, undefined);
   assert.equal(await normal.evaluate('Array.from(document.querySelectorAll("button")).some(button => /Previous|Bookmark|Mark (as|for) review/i.test(button.textContent))'), false);
   assert.equal(await normal.evaluate('Array.from(document.querySelectorAll(".exam-side-actions button")).map(button => button.textContent.trim()).join(",")'), 'Review the Exam,Submit the Exam');
   assert.equal(await normal.evaluate('document.querySelector(".exam-side-actions").getBoundingClientRect().bottom <= document.querySelector(".exam-proctor-panel").getBoundingClientRect().top'), true, 'Review/Submit sit above the proctoring monitor');
@@ -283,11 +296,23 @@ try {
   console.log('PASS: a question that expires while offline advances automatically on reconnect, keeping the saved draft.');
 
   const devices = await page('devices', true); devices.devices = true; await enterExam(devices);
+  for (const width of [320, 375, 768, 1024, 1440]) {
+    await send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false }, devices.sessionId);
+    await devices.evaluate('window.scrollTo(0, document.body.scrollHeight)');
+    assert.equal(await devices.evaluate('document.querySelector(".exam-camera-preview").getBoundingClientRect().top <= 12'), true, `camera stays at the top at ${width}px`);
+    assert.equal(await devices.evaluate('document.querySelector(".exam-camera-preview").parentElement.classList.contains("exam-header")'), true, `camera preview is anchored in the exam header at ${width}px`);
+    assert.equal(await devices.evaluate('document.documentElement.scrollWidth <= innerWidth'), true, `no horizontal overflow at ${width}px`);
+    await devices.evaluate('window.scrollTo(0,0)');
+  }
+  await send('Emulation.clearDeviceMetricsOverride', {}, devices.sessionId);
+  console.log('PASS: exam layout fits 320, 375, 768, 1024 and 1440px; camera remains at the top after scrolling.');
   assert.equal(await devices.evaluate('!!document.fullscreenElement'), true, 'exam runs in fullscreen');
   assert.equal(await devices.evaluate('!!document.querySelector(".exam-camera-preview video")?.srcObject'), true, 'camera feed shown during the exam');
   await devices.evaluate('document.querySelectorAll("input[type=radio]")[2].click()');
   await devices.wait('document.body.innerText.includes("Answer saved.")', 'devices draft save');
   assert.deepEqual(await devices.reload(), ['beforeunload']);
+  await devices.wait('document.readyState === "complete" && (document.fullscreenElement || document.body.innerText.includes("Full-Screen Mode Required"))', 'devices permission recovery');
+  if (!await devices.evaluate('!!document.fullscreenElement')) await devices.click('Return to Full Screen');
   await devices.wait('!!document.querySelector("#active-question")', 'devices question restored after refresh');
   // Headless Chromium keeps fullscreen across a reload (a desktop browser
   // drops it); either way the overlay must match the real state.
@@ -314,14 +339,14 @@ try {
   console.log('PASS: camera, check-in photo and fullscreen required; fullscreen recovery after refresh; submission.');
 
   const early = await page('early', true); await enterExam(early);
-  // Next with no answer asks first; "Go Back" stays on the same question.
+  // An inline status keeps the student on the same question.
   await early.click('Next');
-  await early.wait('document.body.innerText.includes("No answer is selected. Do you want to continue?")', 'no-answer warning');
-  await early.click('Go Back');
-  await early.wait('!document.body.innerText.includes("No answer is selected")', 'warning closed');
-  assert.equal(await early.evaluate('document.querySelector("#active-question").textContent'), questions[0].questionText, 'Go Back keeps the question');
+  await early.wait('!!document.querySelector(".unanswered-message")', 'inline no-answer message');
+  assert.equal(await early.evaluate('!!document.querySelector("[role=alertdialog]")'), false, 'no unanswered popup');
+  assert.equal(await early.evaluate('document.querySelector("#active-question").textContent'), questions[0].questionText, 'Next keeps the unanswered question');
   assert.equal(fixture('early').position, 0, 'nothing was locked or advanced');
   await early.evaluate('document.querySelectorAll("input[type=radio]")[2].click()');
+  await early.wait('!document.querySelector(".unanswered-message")', 'selection clears the inline message');
   await early.wait('document.body.innerText.includes("Answer saved.")', 'early draft save');
   await early.click('Submit'); await early.wait('document.body.innerText.includes("Submit Examination?")', 'submit confirmation');
   assert.equal(await early.evaluate('document.body.innerText.includes("You have answered 1 of 3 questions. 2 questions will be submitted as unanswered.")'), true);
@@ -330,6 +355,34 @@ try {
   assert.equal(fixture('early').submittedAt !== null, true);
   assert.deepEqual([...fixture('early').answers], [[303, 'C']]);
   console.log('PASS: review, subject-wise counts, back navigation blocked, early submission through the secure submit endpoint.');
+
+  const pendingSubmit = await page('pending-submit', true); await enterExam(pendingSubmit);
+  await pendingSubmit.evaluate('document.querySelectorAll("input[type=radio]")[0].click()');
+  await pendingSubmit.wait('document.body.innerText.includes("Answer saved.")', 'original draft saved');
+  await pendingSubmit.evaluate('window.__smokeDropDrafts = true; document.querySelectorAll("input[type=radio]")[3].click()');
+  await pendingSubmit.wait('document.body.innerText.includes("Answer pending")', 'latest selection pending');
+  await pendingSubmit.click('Submit the Exam'); await pendingSubmit.click('Confirm Submission');
+  await pendingSubmit.wait('document.querySelector("[role=alert]")?.textContent.includes("Unable to reach") || document.querySelector(".modal-card [role=alert]")?.textContent.includes("Unable to reach")', 'failed flush stays retryable');
+  assert.equal(fixture('pending-submit').submittedAt, null, 'a failed latest draft must not finalize the attempt');
+  assert.equal(fixture('pending-submit').answers.get(303), 'A', 'only the old saved selection is on the server');
+  assert.equal(requests.filter(r => r.case === 'pending-submit' && r.path === '/api/exam/session/submit').length, 0);
+  assert.equal(await pendingSubmit.evaluate('JSON.parse(sessionStorage.getItem("gtst_pending_answer_attempt-pending-submit")).selectedOption'), 'D', 'pending selection survives failed submission');
+  await pendingSubmit.evaluate('window.__smokeDropDrafts = false');
+  await pendingSubmit.click('Confirm Submission');
+  await pendingSubmit.wait('document.body.innerText.includes("Exam Completed Successfully")', 'pending submission retry');
+  assert.equal(fixture('pending-submit').answers.get(303), 'D', 'latest selection saved before finalizing');
+  assert.equal(requests.filter(r => r.case === 'pending-submit' && r.path === '/api/exam/session/submit').length, 1);
+  console.log('PASS: failed latest autosave prevents submission, retains the pending selection, and retries it before finalization.');
+
+  const offlineEvent = await page('offline-event', true); await enterExam(offlineEvent);
+  await offlineEvent.evaluate('window.__smokeDropEvents = true; window.dispatchEvent(new Event("offline"))');
+  await offlineEvent.wait('document.body.innerText.includes("monitoring event")', 'offline monitoring queue');
+  await offlineEvent.evaluate('window.__smokeDropEvents = false; window.dispatchEvent(new Event("online"))');
+  await offlineEvent.wait('!document.body.innerText.includes("waiting to save")', 'queued connection event acknowledged');
+  assert.ok(requests.some(r => r.case === 'offline-event' && r.body?.eventType === 'NETWORK_DISCONNECT' && r.body.clientEventId && r.body.occurredAt));
+  await offlineEvent.click('Submit the Exam'); await offlineEvent.click('Confirm Submission');
+  await offlineEvent.wait('document.body.innerText.includes("Exam Completed Successfully")', 'offline-event case finalized');
+  console.log('PASS: legacy screen-sharing settings do not request capture or add a system-check gate; offline monitoring events still retry with stable IDs.');
 
   const violations = await page('violations', true); await enterExam(violations);
   const rightClick = 'document.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }))';
@@ -346,19 +399,51 @@ try {
   await violations.click('I Understand');
   assert.equal(fixture('violations').violations, 3, 'every violation is recorded');
   assert.equal(await violations.evaluate('!!document.querySelector("#active-question") && !document.body.innerText.includes("Examination Blocked")'), true, 'the exam continues after any number of violations');
-  // Next with no answer -> "Continue" moves on, leaving the question unanswered.
+  // Skip explicitly leaves the question unanswered.
   await violations.click('Next');
-  await violations.wait('document.body.innerText.includes("No answer is selected. Do you want to continue?")', 'no-answer warning');
-  await violations.click('Continue');
+  await violations.wait('!!document.querySelector(".unanswered-message")', 'inline no-answer warning');
+  await violations.click('Skip');
   await violations.wait(`document.querySelector('#active-question')?.textContent === ${JSON.stringify(questions[1].questionText)}`, 'advanced without an answer');
   assert.equal(fixture('violations').locked.has(questions[0].id), true);
   assert.equal(fixture('violations').answers.get(questions[0].id) ?? null, null, 'left unanswered');
-  console.log('PASS: Next without an answer warns; Go Back stays, Continue moves on unanswered.');
+  console.log('PASS: Next without an answer shows an inline message; explicit Skip moves on unanswered.');
   console.log('PASS: violations are captured with a reason popup (no N/3); the exam is never blocked.');
+
+  const unrecordedViolation = await page('unrecorded-violation', true); await enterExam(unrecordedViolation);
+  await unrecordedViolation.evaluate(rightClick);
+  await unrecordedViolation.wait('document.body.innerText.includes("Right-Click Used") && document.body.innerText.includes("Violation Detected")', 'popup for detected violation when recording is disabled');
+  assert.equal(await unrecordedViolation.evaluate('document.querySelector(".violation-card .violation-note").innerText.includes("recording is disabled")'), true,
+    'popup explains when a detected violation was not recorded');
+  await unrecordedViolation.click('I Understand');
+  console.log('PASS: detected violations use the popup even when the admin has disabled event recording.');
+
+  const video = await page('video', true);
+  fixture('video').videoURL = 'data:video/mp4;base64,YmFkLXZpZGVv';
+  await enterExam(video, true);
+  await video.wait('document.body.innerText.includes("This video could not be played")', 'actionable video codec error');
+  assert.equal(await video.evaluate('Array.from(document.querySelectorAll("button")).find(b => b.textContent.includes("Watch the Video")).disabled'), true, 'broken required video cannot bypass the gate');
+  fixture('video').videoURL = await video.evaluate(`new Promise(resolve => {
+    const canvas = document.createElement('canvas'); canvas.width = 160; canvas.height = 90;
+    const context = canvas.getContext('2d'); const stream = canvas.captureStream(15);
+    const recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8' }); const parts = [];
+    recorder.ondataavailable = event => parts.push(event.data);
+    recorder.onstop = () => { stream.getTracks().forEach(t => t.stop()); const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsDataURL(new Blob(parts, { type: 'video/webm' })); };
+    recorder.start(); let frame = 0; const timer = setInterval(() => { context.fillStyle = frame++ % 2 ? '#0055aa' : '#ffaa00'; context.fillRect(0,0,160,90); }, 60);
+    setTimeout(() => { clearInterval(timer); recorder.stop(); }, 1500);
+  })`);
+  await video.click('Retry Video');
+  await video.wait('document.querySelector(".proctoring-video")?.readyState >= 2', 'playable replacement video');
+  await video.click('Play video with sound');
+  await video.wait('document.body.innerText.includes("Video completed")', 'real video completed', 10000);
+  await video.click('Continue to Exam');
+  await video.wait('!!document.querySelector("#active-question")', 'exam after watching required video');
+  await video.click('Submit the Exam'); await video.click('Confirm Submission');
+  await video.wait('document.body.innerText.includes("Exam Completed Successfully")', 'video case complete');
+  console.log('PASS: broken required video blocks continuation, retry loads a playable video, and normal playback unlocks the exam.');
 
   assert.deepEqual(exceptions, [], 'browser must not throw JavaScript exceptions');
   assert.deepEqual(dialogs.filter((type) => type !== 'beforeunload'), [], 'no unexpected dialogs');
-  console.log('LIMIT: API/database behavior uses an isolated fixture; face recognition, the proctoring video, real camera hardware and a physical microphone require a staging/manual run.');
+  console.log('LIMIT: API/database behavior uses an isolated fixture; face recognition, Safari/Firefox, uploaded video codecs, real camera hardware and a physical microphone require a staging/manual run.');
 } catch (error) {
   console.error(error.stack); console.error('Recent fixture requests:', JSON.stringify(requests.slice(-12))); process.exitCode = 1;
 } finally {

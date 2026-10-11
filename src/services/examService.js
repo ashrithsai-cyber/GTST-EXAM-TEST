@@ -30,8 +30,8 @@ export function updateExamAnswer(token, payload) {
 // loss, face-detection issues, etc). Callers must only surface a "this
 // was recorded" message to the student once this promise resolves
 // successfully — never assume the backend saved it.
-export function recordProctoringEvent(token, { sessionId, eventType, eventMessage }) {
-  return apiPost('/api/exam/proctoring/event', { sessionId, eventType, eventMessage }, token);
+export function recordProctoringEvent(token, { sessionId, eventType, eventMessage, clientEventId, occurredAt }) {
+  return apiPost('/api/exam/proctoring/event', { sessionId, eventType, eventMessage, clientEventId, occurredAt }, token);
 }
 
 // Saves the answer for whichever question the backend currently considers

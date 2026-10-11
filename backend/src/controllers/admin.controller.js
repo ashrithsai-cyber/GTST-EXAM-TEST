@@ -1,4 +1,5 @@
 const bcrypt = require("bcrypt");
+const ExcelJS = require("exceljs");
 const supabase = require("../config/examSupabase");
 const registrationSupabase = require("../config/registrationSupabase");
 const { logAdminAction } = require("../utils/auditLog");
@@ -116,6 +117,26 @@ function parsePagination(query) {
     return { page, limit, from, to };
 }
 
+function parseDateFilters(query, fromKey = "from", toKey = "to") {
+    const parseDay = (value, endOfDay = false) => {
+        if (value === undefined || value === "") return null;
+        if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
+        const date = new Date(`${value}T00:00:00.000Z`);
+        if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) return undefined;
+        if (endOfDay) date.setUTCHours(23, 59, 59, 999);
+        return date.toISOString();
+    };
+    const from = parseDay(query[fromKey]);
+    const to = parseDay(query[toKey], true);
+    if (from === undefined || to === undefined || (from && to && from > to)) return null;
+    return { from, to };
+}
+
+function spreadsheetText(value) {
+    const text = value == null ? "" : String(value);
+    return /^[=+\-@]/.test(text.trimStart()) ? `'${text}` : text;
+}
+
 
 // =====================================================
 // DASHBOARD
@@ -123,15 +144,55 @@ function parsePagination(query) {
 
 const getDashboard = async (req, res) => {
     try {
+        const requestedExamId = req.query.examId ? String(req.query.examId) : null;
+        const requestedDates = parseDateFilters(req.query);
+        if (requestedExamId && !isUuid(requestedExamId)) {
+            return res.status(400).json({ success: false, message: "examId must be a valid exam ID" });
+        }
+        if (!requestedDates) {
+            return res.status(400).json({ success: false, message: "from and to must be valid dates, and from must not be after to" });
+        }
+
         const activeExam = await getActiveExam();
+        let selectedExam = activeExam;
+        if (requestedExamId) {
+            const { data, error } = await supabase
+                .from("exams")
+                .select("id, exam_code, exam_name, status, seconds_per_question")
+                .eq("id", requestedExamId)
+                .maybeSingle();
+            if (error) throw error;
+            if (!data) return res.status(404).json({ success: false, message: "Exam not found" });
+            selectedExam = data;
+        }
+
+        const today = new Date().toISOString().slice(0, 10);
+        const shiftDay = (day, amount) => {
+            const shifted = new Date(`${day}T00:00:00.000Z`);
+            shifted.setUTCDate(shifted.getUTCDate() + amount);
+            return shifted.toISOString().slice(0, 10);
+        };
+        const trendFrom = requestedDates.from
+            ? requestedDates.from.slice(0, 10)
+            : shiftDay(requestedDates.to?.slice(0, 10) || today, -13);
+        const trendTo = requestedDates.to
+            ? requestedDates.to.slice(0, 10)
+            : requestedDates.from
+                ? shiftDay(trendFrom, 13)
+                : today;
+        const trendDays = Math.floor((Date.parse(`${trendTo}T00:00:00.000Z`) - Date.parse(`${trendFrom}T00:00:00.000Z`)) / 86_400_000) + 1;
+        if (trendDays > 90) {
+            return res.status(400).json({ success: false, message: "Dashboard trend date range cannot exceed 90 days" });
+        }
+
         const [examsCount, registrationsResult, activeExamSessionsResult] = await Promise.all([
             supabase.from("exams").select("id", { count: "exact", head: true }),
             registrationSupabase
                 .from("registrations")
                 .select("registration_id")
                 .eq("payment_status", "SUCCESS"),
-            activeExam
-                ? supabase.from("exam_sessions").select("candidate_id, status, last_activity_at, exam_candidates(registration_id)").eq("exam_id", activeExam.id)
+            selectedExam
+                ? supabase.from("exam_sessions").select("candidate_id, status, last_activity_at, exam_candidates(registration_id)").eq("exam_id", selectedExam.id)
                 : Promise.resolve({ data: [], error: null })
         ]);
 
@@ -158,7 +219,7 @@ const getDashboard = async (req, res) => {
         const submittedCount = sessionValues.filter((session) => session.status === "SUBMITTED").length;
         const blockedCount = sessionValues.filter((session) => session.status === "BLOCKED").length;
         const loggedInCandidateIds = new Set();
-        if (eligibleRegistrationIds.size) {
+        if (eligibleRegistrationIds.size && selectedExam?.id === activeExam?.id) {
             const { data: eligibleCandidates, error: eligibleCandidatesError } = await selectInBatches(
                 Array.from(eligibleRegistrationIds),
                 (batch) => supabase.from("exam_candidates").select("id, registration_id").in("registration_id", batch)
@@ -197,7 +258,7 @@ const getDashboard = async (req, res) => {
             .from("exam_sessions")
             .select("total_score, max_score")
             .eq("status", "SUBMITTED")
-            .eq("exam_id", activeExam?.id || "00000000-0000-0000-0000-000000000000");
+            .eq("exam_id", selectedExam?.id || "00000000-0000-0000-0000-000000000000");
 
         if (scoredError) throw scoredError;
 
@@ -210,14 +271,18 @@ const getDashboard = async (req, res) => {
         // rather than via a SQL GROUP BY so an unrecognized/blank class
         // still shows up (bucketed under "Unspecified") instead of being
         // silently dropped.
-        const { data: sessionRows, error: sessionRowsError } = await supabase
-            .from("exam_sessions")
-            .select("status, proctoring_warning_count, exam_candidates(student_class)");
+        const { data: sessionRows, error: sessionRowsError } = selectedExam
+            ? await supabase
+                .from("exam_sessions")
+                .select("status, proctoring_warning_count, exam_candidates(registration_id, student_class)")
+                .eq("exam_id", selectedExam.id)
+            : { data: [], error: null };
 
         if (sessionRowsError) throw sessionRowsError;
 
         const classMap = new Map();
         for (const row of sessionRows) {
+            if (!eligibleRegistrationIds.has(row.exam_candidates?.registration_id)) continue;
             const className = row.exam_candidates?.student_class?.trim() || "Unspecified";
             if (!classMap.has(className)) {
                 classMap.set(className, { studentClass: className, present: 0, ongoing: 0, completed: 0, alerts: 0 });
@@ -238,14 +303,55 @@ const getDashboard = async (req, res) => {
         // SUBMITTED row for a different one.
         let disconnectedCount = 0;
 
-        if (activeExam) {
-            disconnectedCount = sessionValues.filter((session) => isLikelyDisconnected(session, activeExam.seconds_per_question)).length;
+        if (selectedExam?.id === activeExam?.id) {
+            disconnectedCount = sessionValues.filter((session) => isLikelyDisconnected(session, selectedExam.seconds_per_question)).length;
+        }
+
+        const dailyTrend = [];
+        for (let day = trendFrom; day <= trendTo; day = shiftDay(day, 1)) {
+            dailyTrend.push({ date: day, submissions: 0, averageScorePercent: null });
+        }
+        if (selectedExam) {
+            const trendRows = [];
+            const batchSize = 500;
+            for (let offset = 0; ; offset += batchSize) {
+                const { data, error } = await supabase.from("exam_sessions")
+                    .select("submitted_at, total_score, max_score")
+                    .eq("status", "SUBMITTED")
+                    .eq("exam_id", selectedExam.id)
+                    .gte("submitted_at", `${trendFrom}T00:00:00.000Z`)
+                    .lte("submitted_at", `${trendTo}T23:59:59.999Z`)
+                    .order("submitted_at", { ascending: true })
+                    .range(offset, offset + batchSize - 1);
+                if (error) throw error;
+                trendRows.push(...(data || []));
+                if (!data || data.length < batchSize) break;
+            }
+            const byDate = new Map(dailyTrend.map((point) => [point.date, point]));
+            const scoreSums = new Map();
+            const scoreCounts = new Map();
+            for (const row of trendRows || []) {
+                const point = byDate.get(row.submitted_at?.slice(0, 10));
+                if (!point) continue;
+                point.submissions += 1;
+                if (row.max_score > 0) {
+                    scoreSums.set(point.date, (scoreSums.get(point.date) || 0) + (row.total_score / row.max_score) * 100);
+                    scoreCounts.set(point.date, (scoreCounts.get(point.date) || 0) + 1);
+                }
+            }
+            for (const point of dailyTrend) {
+                if (scoreCounts.has(point.date)) {
+                    point.averageScorePercent = Math.round((scoreSums.get(point.date) / scoreCounts.get(point.date)) * 100) / 100;
+                }
+            }
         }
 
         return res.json({
             success: true,
             dashboard: {
                 totalCandidates: loggedInCount,
+                currentlyLoggedIn: loggedInCount,
+                eligibleCandidates: eligibleCount,
                 totalExams: examsCount.count || 0,
                 sessionsInProgress: inProgressCount,
                 sessionsSubmitted: submittedCount,
@@ -253,7 +359,10 @@ const getDashboard = async (req, res) => {
                 sessionsNotStarted: notStartedCount,
                 sessionsDisconnected: disconnectedCount,
                 averageScorePercent: averageScorePercent != null ? Math.round(averageScorePercent * 100) / 100 : null,
-                classBreakdown
+                classBreakdown,
+                selectedExam: selectedExam ? { id: selectedExam.id, name: selectedExam.exam_name, status: selectedExam.status } : null,
+                trendRange: { from: trendFrom, to: trendTo },
+                dailyTrend
             }
         });
     } catch (error) {
@@ -560,43 +669,74 @@ const getExam = async (req, res) => {
 const deleteExam = async (req, res) => {
     try {
         const { examId } = req.params;
+        const { data, error } = await supabase.rpc("admin_delete_exam_completely", {
+            p_exam_id: examId
+        });
+        if (error) throw error;
 
-        const { data: exam, error: examError } = await supabase
-            .from("exams")
-            .select("id, status")
-            .eq("id", examId)
-            .maybeSingle();
+        const failures = {
+            EXAM_NOT_FOUND: [404, "Exam not found"],
+            EXAM_ACTIVE: [409, "Deactivate the exam before permanently deleting it"],
+            EXAM_HAS_ACTIVE_ATTEMPTS: [409, "Students still have attempts in progress. Wait for them to finish before deleting."]
+        };
+        if (failures[data?.code]) {
+            const [status, message] = failures[data.code];
+            return res.status(status).json({ success: false, code: data.code, message });
+        }
+        if (!data?.success || !Array.isArray(data.screenshotPaths)) {
+            throw new Error("Exam deletion returned an invalid response");
+        }
 
-        if (examError) throw examError;
-        if (!exam) return res.status(404).json({ success: false, message: "Exam not found" });
+        let photoCleanupError = null;
+        if (data.screenshotPaths.length) {
+            try {
+                const { error: storageError } = await supabase.storage
+                    .from("system-check-screenshots")
+                    .remove(data.screenshotPaths);
+                if (storageError) photoCleanupError = storageError;
+            } catch (storageError) {
+                photoCleanupError = storageError;
+            }
+        }
 
-        if (exam.status === "ACTIVE") {
-            return res.status(409).json({
+        let auditError = null;
+        try {
+            await logAdminAction(req.admin.id, "DELETE", "exam", examId, {
+                deletedAttempts: data.deletedAttempts,
+                deletedAnswers: data.deletedAnswers,
+                deletedEvents: data.deletedEvents,
+                deletedCheckInPhotos: data.deletedCheckInPhotos,
+                photoCleanupFailed: Boolean(photoCleanupError)
+            });
+        } catch (error) {
+            auditError = error;
+            console.error("deleteExam audit logging failed after permanent deletion:", error, { examId });
+        }
+
+        if (photoCleanupError) {
+            console.error("deleteExam photo cleanup failed after exam records were deleted:", photoCleanupError, {
+                examId, photoCount: data.screenshotPaths.length
+            });
+        }
+        if (photoCleanupError || auditError) {
+            const details = [];
+            if (photoCleanupError) details.push("stored check-in photos could not all be removed");
+            if (auditError) details.push("the admin audit record could not be written");
+            return res.status(500).json({
                 success: false,
-                message: "Cannot delete an ACTIVE exam — deactivate it first via PATCH /exams/:examId/status"
+                examDeleted: true,
+                message: `The exam and its database records were deleted, but ${details.join(" and ")}. Contact support to complete cleanup.`
             });
         }
 
-        const { error } = await supabase
-            .from("exams")
-            .delete()
-            .eq("id", examId);
-
-        if (error) {
-            // exam_sessions.exam_id has no ON DELETE CASCADE by design:
-            // an exam students have sat must never silently vanish.
-            if (error.code === "23503") {
-                return res.status(409).json({
-                    success: false,
-                    message: "Cannot delete this exam — students have already taken it"
-                });
-            }
-            throw error;
-        }
-
-        await logAdminAction(req.admin.id, "DELETE", "exam", examId, null);
-
-        return res.json({ success: true, message: "Exam deleted" });
+        return res.json({
+            success: true,
+            message: "Exam and all exam-specific records and check-in photos were permanently deleted.",
+            deletedAttempts: data.deletedAttempts,
+            deletedAnswers: data.deletedAnswers,
+            deletedEvents: data.deletedEvents,
+            deletedCheckInPhotos: data.deletedCheckInPhotos
+        });
     } catch (error) {
         console.error("deleteExam error:", error);
         return res.status(500).json({ success: false, message: "Unable to delete exam" });
@@ -1305,6 +1445,14 @@ const SESSION_CANDIDATE_FIELDS = "registration_id, full_name, student_class, hal
 const SESSION_BASE_FIELDS =
     "id, candidate_id, exam_id, class_id, status, current_subject_index, current_question_index, question_started_at, started_at, submitted_at, last_activity_at, total_score, max_score, proctoring_warning_count, exams(exam_name, seconds_per_question)";
 
+function missingMonitoringFunction(error, name) {
+    return ["PGRST202", "42883"].includes(error?.code) &&
+        `${error.message || ""} ${error.details || ""}`.includes(name);
+}
+
+const MONITORING_MIGRATION_MESSAGE =
+    "Monitoring summaries are unavailable. Review and apply pending migration 021_admin_monitoring_summary.sql to the exam database, then refresh this page.";
+
 const listSessions = async (req, res) => {
     try {
         const { page, limit, from, to } = parsePagination(req.query);
@@ -1352,6 +1500,25 @@ const listSessions = async (req, res) => {
             throw error;
         }
 
+        const progressBySession = new Map();
+        let monitoringWarning = null;
+        if (data.length) {
+            const { data: progressRows, error: progressError } = await supabase.rpc("admin_exam_attempt_progress", {
+                p_session_ids: data.map((session) => session.id)
+            });
+            if (progressError) {
+                if (!missingMonitoringFunction(progressError, "admin_exam_attempt_progress")) throw progressError;
+                monitoringWarning = MONITORING_MIGRATION_MESSAGE;
+            }
+            for (const progress of progressRows || []) {
+                progressBySession.set(progress.session_id, {
+                    attempted: progress.attempted,
+                    total: progress.total,
+                    current_subject: progress.current_subject
+                });
+            }
+        }
+
         // Presence stage (Logged In / System Check / Rules / In Exam /
         // Completed) is display-only and lives in a separate table keyed
         // by candidate_id — fetched independently rather than as a
@@ -1375,6 +1542,7 @@ const listSessions = async (req, res) => {
             const presence = presenceByCandidate.get(session.candidate_id);
             const enriched = {
                 ...session,
+                attempt_progress: progressBySession.get(session.id) || null,
                 presence_stage: presence?.stage || null,
                 presence_updated_at: presence?.updated_at || null
             };
@@ -1384,7 +1552,7 @@ const listSessions = async (req, res) => {
             };
         });
 
-        return res.json({ success: true, page, limit, total: count, sessions });
+        return res.json({ success: true, page, limit, total: count, sessions, monitoringWarning });
     } catch (error) {
         console.error("listSessions error:", error);
         return res.status(500).json({ success: false, message: "Unable to fetch sessions" });
@@ -1599,31 +1767,125 @@ const getSessionAnswerSheet = async (req, res) => {
 // rank/classRank/qualification-status field: no official ranking rule
 // is defined anywhere in this system, so the admin frontend must not
 // invent one (see admin-frontend/src/services/results.js).
+function resultFilters(query) {
+    const examId = query.examId ? String(query.examId) : null;
+    const className = query.className ? String(query.className).trim() : null;
+    const dates = parseDateFilters(query);
+    if (examId && !isUuid(examId)) return { error: "examId must be a valid exam ID" };
+    if (className && (!className.length || className.length > 80)) return { error: "className must be 1–80 characters" };
+    if (!dates) return { error: "from and to must be valid dates, and from must not be after to" };
+    return { filters: { examId, className, dates, term: sanitizeSearchTerm(query.search) } };
+}
+
+function resultQuery(filters, { count = false } = {}) {
+    const needsCandidateJoin = Boolean(filters.term || filters.className);
+    let query = supabase
+        .from("exam_sessions")
+        .select(
+            `id, candidate_id, exam_id, submitted_at, total_score, max_score, exam_candidates${needsCandidateJoin ? "!inner" : ""}(registration_id, full_name, student_class)`,
+            count ? { count: "exact" } : undefined
+        )
+        .eq("status", "SUBMITTED")
+        .order("submitted_at", { ascending: false });
+    if (filters.examId) query = query.eq("exam_id", filters.examId);
+    if (filters.className) query = query.eq("exam_candidates.student_class", filters.className);
+    if (filters.dates.from) query = query.gte("submitted_at", filters.dates.from);
+    if (filters.dates.to) query = query.lte("submitted_at", filters.dates.to);
+    if (filters.term) {
+        query = query.or(
+            `registration_id.ilike.%${filters.term}%,full_name.ilike.%${filters.term}%`,
+            { foreignTable: "exam_candidates" }
+        );
+    }
+    return query;
+}
+
+async function allResultRows(filters) {
+    const rows = [];
+    const batchSize = 500;
+    for (let from = 0; ; from += batchSize) {
+        const { data, error } = await resultQuery(filters).range(from, from + batchSize - 1);
+        if (error) throw error;
+        rows.push(...(data || []));
+        if (!data || data.length < batchSize) return rows;
+    }
+}
+
+const RESULT_EXPORT_HEADERS = ["Student Name", "Registration ID", "Class", "Exam ID", "Submitted At", "Score", "Maximum Score", "Percentage"];
+function resultExportRow(row) {
+    const candidate = row.exam_candidates || {};
+    return [
+        candidate.full_name, candidate.registration_id, candidate.student_class,
+        row.exam_id, row.submitted_at, row.total_score, row.max_score,
+        row.max_score ? Math.round((row.total_score / row.max_score) * 1000) / 10 : 0
+    ];
+}
+
+function csvDocument(headers, records) {
+    const csvCell = (value) => {
+        const safe = spreadsheetText(value);
+        return `"${safe.replace(/"/g, '""')}"`;
+    };
+    return `\uFEFF${[headers, ...records].map((record) => record.map(csvCell).join(",")).join("\r\n")}`;
+}
+
 const listResults = async (req, res) => {
     try {
+        const selected = resultFilters(req.query);
+        if (selected.error) return res.status(400).json({ success: false, message: selected.error });
         const { page, limit, from, to } = parsePagination(req.query);
-
-        const { data, error, count } = await supabase
-            .from("exam_sessions")
-            .select(
-                "id, candidate_id, exam_id, submitted_at, total_score, max_score, exam_candidates(registration_id, full_name, student_class)",
-                { count: "exact" }
-            )
-            .eq("status", "SUBMITTED")
-            .order("submitted_at", { ascending: false })
-            .range(from, to);
-
+        const { data, error, count } = await resultQuery(selected.filters, { count: true }).range(from, to);
         if (error) throw error;
-
         const results = data.map((row) => ({
             ...row,
             percentage: row.max_score ? Math.round((row.total_score / row.max_score) * 1000) / 10 : 0
         }));
-
         return res.json({ success: true, page, limit, total: count, results });
     } catch (error) {
         console.error("listResults error:", error);
         return res.status(500).json({ success: false, message: "Unable to fetch results" });
+    }
+};
+
+const exportResultsCsv = async (req, res) => {
+    try {
+        const selected = resultFilters(req.query);
+        if (selected.error) return res.status(400).json({ success: false, message: selected.error });
+        const rows = await allResultRows(selected.filters);
+        res.set({
+            "Content-Type": "text/csv; charset=utf-8",
+            "Content-Disposition": 'attachment; filename="gtst-exam-results.csv"',
+            "Cache-Control": "no-store"
+        });
+        return res.send(csvDocument(RESULT_EXPORT_HEADERS, rows.map(resultExportRow)));
+    } catch (error) {
+        console.error("exportResultsCsv error:", error);
+        return res.status(500).json({ success: false, message: "Unable to export results" });
+    }
+};
+
+const exportResultsXlsx = async (req, res) => {
+    try {
+        const selected = resultFilters(req.query);
+        if (selected.error) return res.status(400).json({ success: false, message: selected.error });
+        const rows = await allResultRows(selected.filters);
+        const workbook = new ExcelJS.Workbook();
+        const sheet = workbook.addWorksheet("Results");
+        sheet.addRow(RESULT_EXPORT_HEADERS);
+        for (const row of rows) {
+            const exported = resultExportRow(row);
+            sheet.addRow(exported.map((value) => typeof value === "string" ? spreadsheetText(value) : value));
+        }
+        sheet.getRow(1).font = { bold: true };
+        res.set({
+            "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "Content-Disposition": 'attachment; filename="gtst-exam-results.xlsx"',
+            "Cache-Control": "no-store"
+        });
+        return res.send(await workbook.xlsx.writeBuffer());
+    } catch (error) {
+        console.error("exportResultsXlsx error:", error);
+        return res.status(500).json({ success: false, message: "Unable to export results" });
     }
 };
 
@@ -1634,34 +1896,176 @@ const listResults = async (req, res) => {
 
 const listProctoringEvents = async (req, res) => {
     try {
+        const selected = proctoringFilters(req.query);
+        if (selected.error) return res.status(400).json({ success: false, message: selected.error });
         const { page, limit, from, to } = parsePagination(req.query);
-
-        let query = supabase
-            .from("exam_events")
-            .select(
-                "id, session_id, event_type, event_message, warning_number, reviewed, reviewed_at, created_at, exam_sessions(candidate_id, exam_id, status, proctoring_warning_count, exams(exam_name), exam_candidates(registration_id, full_name, student_class))",
-                { count: "exact" }
-            )
-            .order("created_at", { ascending: false })
-            .range(from, to);
-
-        if (req.query.sessionId) {
-            query = query.eq("session_id", req.query.sessionId);
-        }
-        if (req.query.eventType) {
-            query = query.eq("event_type", String(req.query.eventType));
-        }
-        if (req.query.reviewed !== undefined) {
-            query = query.eq("reviewed", req.query.reviewed === "true");
-        }
-
-        const { data, error, count } = await query;
+        const { data, error, count } = await proctoringEventQuery(selected.filters, { count: true }).range(from, to);
         if (error) throw error;
-
         return res.json({ success: true, page, limit, total: count, events: data });
     } catch (error) {
         console.error("listProctoringEvents error:", error);
         return res.status(500).json({ success: false, message: "Unable to fetch proctoring events" });
+    }
+};
+
+const PROCTORING_EVENT_TYPES = new Set([
+    "MULTIPLE_FACE", "NO_FACE", "CAMERA_DISABLED", "MICROPHONE_DISABLED", "TAB_SWITCH",
+    "WINDOW_BLUR", "FULLSCREEN_EXIT", "RIGHT_CLICK", "COPY_PASTE", "NETWORK_DISCONNECT",
+    "NETWORK_RECONNECT", "EXAM_LEFT", "SCREEN_SHARE_STOPPED"
+]);
+
+function proctoringFilters(query) {
+    const examId = query.examId ? String(query.examId) : null;
+    const sessionId = query.sessionId ? String(query.sessionId) : null;
+    const eventType = query.eventType ? String(query.eventType) : null;
+    const className = query.className ? String(query.className).trim() : null;
+    const dates = parseDateFilters(query, "from", "to");
+    const reviewed = query.reviewed === undefined ? null : String(query.reviewed);
+    let createdAfter = null;
+    if (query.createdAfter !== undefined) {
+        const parsed = new Date(String(query.createdAfter));
+        if (Number.isNaN(parsed.getTime())) return { error: "createdAfter must be a valid date/time" };
+        createdAfter = parsed.toISOString();
+    }
+    if (examId && !isUuid(examId)) return { error: "examId must be a valid exam ID" };
+    if (sessionId && !isUuid(sessionId)) return { error: "sessionId must be a valid session ID" };
+    if (eventType && !PROCTORING_EVENT_TYPES.has(eventType)) return { error: "eventType is not recognized" };
+    if (className && (!className.length || className.length > 80)) return { error: "className must be 1–80 characters" };
+    if (reviewed !== null && !["true", "false"].includes(reviewed)) return { error: "reviewed must be true or false" };
+    if (!dates) return { error: "from and to must be valid dates, and from must not be after to" };
+    return {
+        filters: {
+            examId, sessionId, eventType, className, dates,
+            reviewed: reviewed === null ? null : reviewed === "true", createdAfter,
+            term: sanitizeSearchTerm(query.search)
+        }
+    };
+}
+
+function proctoringEventQuery(filters, { count = false } = {}) {
+    const candidateJoin = filters.term || filters.className ? "exam_candidates!inner" : "exam_candidates";
+    let query = supabase.from("exam_events")
+        .select(
+            `id, session_id, event_type, event_message, warning_number, reviewed, reviewed_at, created_at, occurred_at, is_violation, exam_sessions!inner(candidate_id, exam_id, status, proctoring_warning_count, exams(exam_name), ${candidateJoin}(registration_id, full_name, student_class))`,
+            count ? { count: "exact" } : undefined
+        )
+        .order("created_at", { ascending: false });
+    if (filters.sessionId) query = query.eq("session_id", filters.sessionId);
+    if (filters.examId) query = query.eq("exam_sessions.exam_id", filters.examId);
+    if (filters.className) query = query.eq("exam_sessions.exam_candidates.student_class", filters.className);
+    if (filters.eventType) query = query.eq("event_type", filters.eventType);
+    if (filters.reviewed !== null) query = query.eq("reviewed", filters.reviewed);
+    if (filters.dates.from) query = query.gte("created_at", filters.dates.from);
+    if (filters.dates.to) query = query.lte("created_at", filters.dates.to);
+    if (filters.createdAfter) query = query.gte("created_at", filters.createdAfter);
+    if (filters.term) {
+        query = query.or(
+            `registration_id.ilike.%${filters.term}%,full_name.ilike.%${filters.term}%`,
+            { foreignTable: "exam_sessions.exam_candidates" }
+        );
+    }
+    return query;
+}
+
+async function allProctoringEvents(filters, { violationsOnly = false } = {}) {
+    const rows = [];
+    const batchSize = 500;
+    for (let from = 0; ; from += batchSize) {
+        const { data, error } = await proctoringEventQuery(filters).range(from, from + batchSize - 1);
+        if (error) throw error;
+        rows.push(...(data || []));
+        if (!data || data.length < batchSize) {
+            return violationsOnly
+                ? rows.filter((event) => event.is_violation === true ||
+                    (event.is_violation == null && !["NETWORK_DISCONNECT", "NETWORK_RECONNECT"].includes(event.event_type)))
+                : rows;
+        }
+    }
+}
+
+const PROCTORING_EXPORT_HEADERS = [
+    "Student Name", "Registration ID", "Class", "Exam", "Session ID", "Event Type",
+    "Event Message", "Event Time", "Violation", "Reviewed", "Reviewed At", "Warning Number"
+];
+function proctoringExportRow(event) {
+    const session = event.exam_sessions || {};
+    const candidate = session.exam_candidates || {};
+    const violation = event.is_violation === null || event.is_violation === undefined
+        ? !["NETWORK_DISCONNECT", "NETWORK_RECONNECT"].includes(event.event_type)
+        : event.is_violation;
+    return [
+        candidate.full_name, candidate.registration_id, candidate.student_class,
+        session.exams?.exam_name, event.session_id, event.event_type, event.event_message,
+        event.occurred_at || event.created_at, violation ? "Yes" : "No",
+        event.reviewed ? "Yes" : "No", event.reviewed_at, event.warning_number
+    ];
+}
+
+const exportProctoringEventsCsv = async (req, res) => {
+    try {
+        const selected = proctoringFilters(req.query);
+        if (selected.error) return res.status(400).json({ success: false, message: selected.error });
+        const rows = await allProctoringEvents(selected.filters, { violationsOnly: true });
+        res.set({
+            "Content-Type": "text/csv; charset=utf-8",
+            "Content-Disposition": 'attachment; filename="gtst-proctoring-violations.csv"',
+            "Cache-Control": "no-store"
+        });
+        return res.send(csvDocument(PROCTORING_EXPORT_HEADERS, rows.map(proctoringExportRow)));
+    } catch (error) {
+        console.error("exportProctoringEventsCsv error:", error);
+        return res.status(500).json({ success: false, message: "Unable to export proctoring events" });
+    }
+};
+
+const exportProctoringEventsXlsx = async (req, res) => {
+    try {
+        const selected = proctoringFilters(req.query);
+        if (selected.error) return res.status(400).json({ success: false, message: selected.error });
+        const rows = await allProctoringEvents(selected.filters, { violationsOnly: true });
+        const workbook = new ExcelJS.Workbook();
+        const sheet = workbook.addWorksheet("Proctoring Violations");
+        sheet.addRow(PROCTORING_EXPORT_HEADERS);
+        for (const row of rows) {
+            sheet.addRow(proctoringExportRow(row).map((value) => typeof value === "string" ? spreadsheetText(value) : value));
+        }
+        sheet.getRow(1).font = { bold: true };
+        res.set({
+            "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "Content-Disposition": 'attachment; filename="gtst-proctoring-violations.xlsx"',
+            "Cache-Control": "no-store"
+        });
+        return res.send(await workbook.xlsx.writeBuffer());
+    } catch (error) {
+        console.error("exportProctoringEventsXlsx error:", error);
+        return res.status(500).json({ success: false, message: "Unable to export proctoring events" });
+    }
+};
+
+const summarizeMonitoringEvents = async (req, res) => {
+    try {
+        const sessionIds = req.body?.sessionIds;
+        if (!Array.isArray(sessionIds) || sessionIds.length > 500 ||
+            sessionIds.some((id) => !isUuid(id))) {
+            return res.status(400).json({ success: false, message: "sessionIds must contain at most 500 valid session IDs" });
+        }
+        if (!sessionIds.length) return res.json({ success: true, summaries: [] });
+
+        const { data, error } = await supabase.rpc("admin_monitoring_event_summary", {
+            p_session_ids: Array.from(new Set(sessionIds))
+        });
+        if (missingMonitoringFunction(error, "admin_monitoring_event_summary")) {
+            return res.status(503).json({
+                success: false,
+                code: "MONITORING_MIGRATION_REQUIRED",
+                message: MONITORING_MIGRATION_MESSAGE
+            });
+        }
+        if (error) throw error;
+        return res.json({ success: true, summaries: data || [] });
+    } catch (error) {
+        console.error("summarizeMonitoringEvents error:", error);
+        return res.status(500).json({ success: false, message: "Unable to summarize monitoring events" });
     }
 };
 
@@ -1930,6 +2334,46 @@ const releaseCandidateDeviceSession = async (req, res) => {
     }
 };
 
+const resetExamAttempts = async (req, res) => {
+    try {
+        const { examId } = req.params;
+        const { data, error } = await supabase.rpc("admin_reset_exam_attempts", {
+            p_exam_id: examId
+        });
+        if (error) throw error;
+
+        const failures = {
+            EXAM_NOT_FOUND: [404, "Exam not found"],
+            EXAM_ACTIVE: [409, "Deactivate the exam before resetting student attempts"],
+            EXAM_HAS_ACTIVE_ATTEMPTS: [409, "Students still have attempts in progress. Wait for them to finish before resetting."],
+            CANDIDATE_ACTIVE_IN_ANOTHER_EXAM: [409, "A student in this exam has an active attempt in another exam. Resolve it before resetting."]
+        };
+        if (failures[data?.code]) {
+            const [status, message] = failures[data.code];
+            return res.status(status).json({ success: false, code: data.code, message });
+        }
+        if (!data?.success) throw new Error("Exam reset returned an invalid response");
+
+        await logAdminAction(req.admin.id, "RESET_EXAM_ATTEMPTS", "exam", examId, {
+            candidateCount: data.candidateCount,
+            deletedAttempts: data.deletedAttempts,
+            deletedAnswers: data.deletedAnswers,
+            deletedEvents: data.deletedEvents,
+            releasedLoginSessions: data.releasedLoginSessions,
+            clearedPreflightRecords: data.clearedPreflightRecords,
+            clearedPresenceRecords: data.clearedPresenceRecords
+        });
+        return res.json({
+            success: true,
+            message: "Exam attempts were reset. Students can log in again and start a new attempt.",
+            ...data
+        });
+    } catch (error) {
+        console.error("resetExamAttempts error:", error);
+        return res.status(500).json({ success: false, message: "Unable to reset exam attempts" });
+    }
+};
+
 module.exports = {
     subjectHasLiveSessions,
     LIVE_SESSIONS_MESSAGE,
@@ -1944,6 +2388,7 @@ module.exports = {
     updateExam,
     updateExamStatus,
     updateResultsPublication,
+    resetExamAttempts,
     deleteExam,
     listClasses,
     createClass,
@@ -1963,7 +2408,12 @@ module.exports = {
     getSessionResult,
     getSessionAnswerSheet,
     listResults,
+    exportResultsCsv,
+    exportResultsXlsx,
     listProctoringEvents,
+    exportProctoringEventsCsv,
+    exportProctoringEventsXlsx,
+    summarizeMonitoringEvents,
     reviewProctoringEvent,
     listAuditLogs,
     listAdminUsers,

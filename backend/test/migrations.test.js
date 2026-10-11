@@ -37,7 +37,8 @@ test.before(async () => {
     await db.exec(migration("017_sequential_attempts.sql"));
     await db.exec(migration("018_single_device_sessions.sql"));
     await db.exec(migration("019_attempt_integrity.sql"));
-    // The migrations must remain safely re-runnable as a deployment set.
+    // Controlled reapplication is exercised only in this disposable test
+    // schema; it is not a recommendation to replay migrations on populated DBs.
     await db.exec(migration("017_sequential_attempts.sql"));
     await db.exec(migration("018_single_device_sessions.sql"));
     await db.exec(migration("019_attempt_integrity.sql"));

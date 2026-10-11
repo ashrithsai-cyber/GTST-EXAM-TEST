@@ -58,6 +58,7 @@ export const ExamProvider = ({ children }) => {
   const syncing = useRef(false);
   const stateVersion = useRef(0);
   const advancing = useRef(false);
+  const finalizing = useRef(null);
   const latestAnswers = useRef(answers);
   latestAnswers.current = answers;
   activeQuestion.current = currentQuestion;
@@ -118,6 +119,7 @@ export const ExamProvider = ({ children }) => {
   }, [syncClocks, markSubmitted]);
   const getAns = (questionId) => answers[questionId] || { sel: null };
   const setAns = (questionId, patch) => {
+    if (finalizing.current) return;
     stateVersion.current += 1;
     const next = { ...latestAnswers.current, [questionId]: { sel: null, ...latestAnswers.current[questionId], ...patch } };
     latestAnswers.current = next; setAnswers(next);
@@ -226,6 +228,7 @@ export const ExamProvider = ({ children }) => {
     };
   }, [sessionId, submitted, syncExam]);
   const lockAnswerAndAdvance = useCallback(async (timeSpentSeconds) => {
+    if (advancing.current) throw new Error('Your answer is being saved. Please wait.');
     const question = activeQuestion.current;
     if (!question) throw new Error('No active question to save');
     const epoch = generation.current;
@@ -246,11 +249,48 @@ export const ExamProvider = ({ children }) => {
     return response;
     } finally { advancing.current = false; }
   }, [token, applyCurrent, syncClocks, markSubmitted]);
-  const finalizeSubmission = useCallback(async () => {
-    await draftQueue.current.catch(() => {});
-    const response = await submitExamSession(token, activeSession.current);
-    markSubmitted(response); return response;
-  }, [token, markSubmitted]);
+  const finalizeSubmission = useCallback(() => {
+    if (finalizing.current) return finalizing.current;
+    if (advancing.current) return Promise.reject(new Error('Your answer is being saved. Please wait.'));
+    const epoch = generation.current;
+    const attemptId = activeSession.current;
+    if (!attemptId) return Promise.reject(new Error('Please restore your examination before submitting.'));
+    // Serialize voluntary submission with Next, timer advance and background
+    // synchronization. A failed autosave is recoverable, never permission to
+    // submit an older server selection and erase the local pending answer.
+    advancing.current = true;
+    const ensureCurrentAttempt = () => {
+      if (epoch !== generation.current || activeSession.current !== attemptId) {
+        throw new Error('Your examination session changed. Please restore it before submitting.');
+      }
+    };
+    const operation = (async () => {
+      await draftQueue.current.catch(() => {});
+      ensureCurrentAttempt();
+      const draft = pendingDraft.current || readPending(attemptId);
+      if (draft) {
+        if (activeQuestion.current?.id !== draft.questionId) {
+          throw new Error('Please restore your pending answer before submitting.');
+        }
+        const saved = await saveAnswerDraft(draft.questionId, draft.selectedOption);
+        ensureCurrentAttempt();
+        // The server may have finalized at its deadline while flushing.
+        if (saved?.autoSubmitted || saved?.submitted || saved?.status === 'SUBMITTED') return saved;
+      }
+      ensureCurrentAttempt();
+      const response = await submitExamSession(token, attemptId);
+      ensureCurrentAttempt();
+      markSubmitted(response);
+      return response;
+    })().finally(() => {
+      if (epoch === generation.current) {
+        advancing.current = false;
+        finalizing.current = null;
+      }
+    });
+    finalizing.current = operation;
+    return operation;
+  }, [token, markSubmitted, saveAnswerDraft]);
   const resetExam = useCallback(() => {
     generation.current += 1;
     setSessionId(null); setExamMeta(null); setSubjectsMeta([]); setCurrentQuestion(null);
@@ -260,6 +300,7 @@ export const ExamProvider = ({ children }) => {
     setExamComplete(false); setWaitingForStart(null); setExamTimeLeft(null); setExamEndAt(null);
     clocks.current = { question: null, exam: null }; pendingDraft.current = null;
     activeQuestion.current = null; activeSession.current = null; setDraftStatus('idle'); draftQueue.current = Promise.resolve();
+    advancing.current = false; finalizing.current = null;
   }, []);
   useLayoutEffect(resetExam, [student?.registrationId, resetExam]);
   const answeredCountFor = (subjectKey) => questionItems.filter((item) =>

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { createCameraHealth } from '../utils/cameraHealth';
 
 const VIDEO_CONSTRAINTS = { width: { ideal: 640 }, height: { ideal: 480 } };
 // How long to wait, after permission is granted, for the <video> (rendered
@@ -50,6 +51,8 @@ export function useCamera({ enabled = true } = {}) {
 
     let cancelled = false;
     let pollTimer = null;
+    let healthTimer = null;
+    let removeHealthListeners = () => {};
     const wait = (ms) => new Promise((resolve) => { pollTimer = setTimeout(resolve, ms); });
 
     const requestStream = async () => {
@@ -126,6 +129,20 @@ export function useCamera({ enabled = true } = {}) {
       streamRef.current = mediaStream;
       setStream(mediaStream);
 
+      const checkHealth = createCameraHealth();
+      const monitor = () => {
+        if (cancelled) return;
+        const state = checkHealth({ track: liveTrack, video: videoRef.current, hidden: document.hidden, now: performance.now() });
+        if (state) { setReady(state.ready); setError(state.error); }
+      };
+      liveTrack.addEventListener('mute', monitor);
+      liveTrack.addEventListener('unmute', monitor);
+      removeHealthListeners = () => {
+        liveTrack.removeEventListener('mute', monitor);
+        liveTrack.removeEventListener('unmute', monitor);
+      };
+      healthTimer = setInterval(monitor, 500);
+
       const gotFrame = await waitForFirstFrame(mediaStream);
       if (cancelled) return;
       if (gotFrame) {
@@ -140,6 +157,8 @@ export function useCamera({ enabled = true } = {}) {
     return () => {
       cancelled = true;
       clearTimeout(pollTimer);
+      clearInterval(healthTimer);
+      removeHealthListeners();
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());
         streamRef.current = null;

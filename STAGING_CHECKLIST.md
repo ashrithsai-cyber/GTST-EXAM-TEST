@@ -3,6 +3,8 @@
 Staging only. **Do not deploy to production from this checklist.**
 Each section ends with what "pass" looks like. Record failures before
 moving on; a failed item in sections 1–6 blocks the verification runs in 7.
+Screen sharing is not part of the portal. Any screen-sharing columns already
+present from an earlier migration are left untouched and ignored.
 
 ---
 
@@ -13,9 +15,9 @@ moving on; a failed item in sections 1–6 blocks the verification runs in 7.
 - [ ] Keep the **previous** backend build and both previous frontend `dist/` folders, so you can roll back (section 8).
 - [ ] Take a database snapshot of the staging exam project (Supabase backup / PITR, or `pg_dump`).
 - [ ] Local gate on the deployed commit:
-  - `cd backend && npm ci && npm test && npm run check`. Expect 58 pass, 0 fail; the 13 PostgreSQL cases skip unless `TEST_DATABASE_URL` is set.
-  - `npm ci && npm test && npm run build && npm run test:browser` (root). Expect 13 unit tests and 6 `PASS:` browser scenarios.
-  - `cd admin-frontend && npm ci && npm run typecheck && npm run build`
+  - `cd backend && npm ci && npm test && npm run check`. Record the runner's actual pass/fail/skip totals; PostgreSQL concurrency cases skip unless `TEST_DATABASE_URL` is set.
+  - `npm ci && npm test && npm run lint && npm run build && npm run test:browser` (root). Record unit, lint, build, and browser results.
+  - `cd admin-frontend && npm ci && npm run typecheck && npm run lint && npm run build`
   - Optional: `TEST_DATABASE_URL=postgres://…@127.0.0.1:…/postgres npm run test:postgres` against a **local** PostgreSQL. Expect 13/13.
 
 ## 1. Database migration (exam Supabase project)
@@ -23,22 +25,29 @@ moving on; a failed item in sections 1–6 blocks the verification runs in 7.
 Full order and purposes: [`backend/sql/README.md`](backend/sql/README.md).
 
 - [ ] If the staging database already has data, run the read-only `backend/sql/checks/attempt_consistency_audit.sql` and save the output ("before").
-- [ ] In the SQL Editor, run each pending file **in numeric order**, `001` → `019`. Fresh database: all 19. Existing database: only the ones not yet applied.
-- [ ] `017`, `018` and `019` are applied together, then the backend is (re)started.
-- [ ] Never re-run `001` on an existing database (it breaks after `010`). 002–019 are safe to re-run.
+- [ ] Verify the applied migration state and a restorable backup, then run only missing files **in numeric order**, `001` → `023`. Fresh database: all 23.
+- [ ] Never blindly replay historical migrations on a populated database. `001` is incompatible after `010`, and `010` includes destructive legacy/sample-data cleanup; idempotent DDL does not prove data-safe replay.
+- [ ] Apply pending migrations `017`–`023` in order before deploying the matching backend.
 - [ ] `019` notices saying `left NOT VALID` are expected only if the database holds pre-017 attempts.
 - [ ] Verify objects exist:
   ```sql
   select proname from pg_proc where proname in
     ('init_exam_attempt','save_exam_answer','submit_exam_attempt','expire_exam_attempts',
      'acquire_student_login_session','touch_student_login_session','assert_exam_login_session',
-     'start_exam_attempt','block_exam_attempt','admin_release_student_login_session') order by 1;
-  -- expect 10 rows
+     'start_exam_attempt','block_exam_attempt','admin_release_student_login_session',
+     'record_exam_event','admin_monitoring_event_summary','admin_exam_attempt_progress',
+     'admin_reset_exam_attempts','admin_delete_exam_completely') order by 1;
+  -- expect 15 rows
   select tgname from pg_trigger where tgname = 'exam_sessions_status_guard';  -- expect 1 row
   ```
 - [ ] Run the audit again ("after"): every check `0`. `legacy_*` rows may be non-zero only for pre-017 data.
 
-**Pass:** 10 functions, 1 trigger, audit all zero.
+**Pass:** 15 functions, 1 trigger, audit all zero.
+
+Only on a disposable staging exam after backup verification, test the
+typed-name permanent-delete flow. Confirm active exams and in-progress attempts
+are refused, and check-in photo objects are removed from the private bucket.
+Never use this test on production student records.
 
 ## 2. Supabase configuration
 
@@ -156,15 +165,24 @@ Use at least: one Windows/Chrome laptop with webcam and mic, one second device (
 - [ ] Right-click and copy/paste are blocked. Right-click counts as a violation; copy/paste is logged only.
 - [ ] Turn a category off in Exam Settings → that event is no longer recorded.
 
-### 7.6 Device session
+### 7.6 Device session and recovery
 - [ ] Device A logged in → Device B logs in with the same credentials → "Your exam is already active on another device."
-- [ ] Device A refresh → continues the same attempt, no new login.
-- [ ] Device A Wi-Fi off for ~1 minute → back online → continues; unsent answer saved ("Answer saved").
-- [ ] Close Device A without logging out; after **10+ minutes** Device B can log in and continues the **same** attempt and question.
+- [ ] Start an attempt on Device A, select an answer, wait for **Answer saved**, then refresh. Verify the same attempt, question, and selected answer load; no second `exam_sessions` row is created.
+- [ ] With a question active, turn Device A Wi-Fi off for 60 seconds. Select an answer and trigger one tab-switch violation while offline. Restore Wi-Fi; verify the same attempt recovers, the answer is acknowledged as saved, and the violation appears once (no duplicate after retry).
+- [ ] Close Device A's browser without logging out. Before the 10-minute idle lease expires, Device B must be refused. After **10+ minutes**, Device B can log in and resume the **same** attempt and current question; no attempt is reset.
+- [ ] While the attempt is still in progress, briefly disconnect then refresh/reopen the same browser. Verify the server deadline continues to count down and that previously acknowledged answers remain present.
 - [ ] Admin: Student Data → student → **Device Session** → shows signed-in and last-seen times. Release with a reason → Device A gets "session expired"; Device B logs in; **Audit Logs** shows `RELEASE_DEVICE_SESSION` with the reason.
 - [ ] Logout on A → B can log in immediately.
 
-### 7.7 Exam timer
+### 7.7 Instruction video compatibility and recovery
+- [ ] Upload an instruction video encoded as **MP4 (H.264 video/AAC audio)** in Admin → Videos, then enable the video requirement for this staging exam.
+- [ ] On the Rules page, select **Play video with sound**. Verify picture and audio, controls, progress/time, and that Continue stays disabled until the video is watched to the end.
+- [ ] Pause and resume: confirm the video resumes and still must reach the end. Attempt to seek ahead; verify the watched-progress guard prevents skipping.
+- [ ] Simulate a network interruption while loading/playing. Wait for the visible buffering/recovery error; select **Retry Video** after network returns. Verify playback restarts cleanly and the required completion gate still works.
+- [ ] Upload a deliberately unsupported test format only if it is isolated to staging. Verify the page gives the MP4 H.264/AAC compatibility/retry guidance; restore the supported video before sign-off.
+- [ ] Check the browser console and backend logs for media errors or repeated failed retries; record browser, codec, and file MIME type.
+
+### 7.8 Exam timer
 - [ ] Exam and question timers count down; **refresh does not reset** either.
 - [ ] Change the computer's clock ±1 hour mid-exam (without refreshing) → remaining time unchanged. *(A refresh with the clock pushed forward makes the saved login look expired: the student logs in again and resumes the same attempt.)*
 - [ ] Let a question run out → advances automatically; the last selected answer is kept.
@@ -175,24 +193,24 @@ Use at least: one Windows/Chrome laptop with webcam and mic, one second device (
 - [ ] Change the exam's start or duration while an attempt is running → **that** attempt keeps its deadline (intended policy).
 - [ ] After completion, logging in again shows "Your examination has been completed"; no restart is possible.
 
-### 7.8 Admin monitoring
+### 7.9 Admin monitoring
 - [ ] Dashboard counts move correctly: Logged In → In Progress → Submitted (and Blocked).
 - [ ] Live Students shows stage (System Check / Rules / In Exam), warnings and **Disconnected** after ~90 s without contact (or 2× the seconds per question, if longer).
 - [ ] A completed student who logs in again still shows **Completed**, not "Logged In".
 - [ ] Results stay hidden from students until published; scores visible to the admin.
 - [ ] Admin actions (exam edits, device release) appear in Audit Logs.
 
-### 7.9 Data integrity after the runs
+### 7.10 Data integrity after the runs
 - [ ] Run `backend/sql/checks/attempt_consistency_audit.sql` → every non-legacy check `0`.
 
 ## 8. Rollback procedure
 
-Database migrations 001–019 are **additive**. Roll back the application first; touch the database only if needed.
+Migrations 020–021 are additive; the historical migration set is not uniformly safe to replay or roll back on populated data. Roll back the application first; touch the database only if needed.
 
 1. **Decide:** roll back for blocked logins, attempts that cannot start or save, wrong scoring, or backend errors that a config fix cannot resolve. Avoid rolling back while attempts are running; if you must, announce a pause first.
 2. **Capture state:** save backend logs and run the audit query.
 3. **Application:** redeploy the previous backend build and the previous student and admin `dist/` folders (kept in section 0). Check `/api/health`.
-4. **Database: leave 001–019 in place.** By code inspection, the previous backend version runs with 019 applied. This has not been tested, so verify step 6 on staging. Do **not** roll back across 017/018 while attempts exist: their question sequences live in those tables.
+4. **Database: leave applied migrations in place.** Verify the previous backend on staging before relying on backward compatibility with 020–021. Do **not** roll back across 017/018 while attempts exist: their question sequences live in those tables.
 5. **Only if 019 itself is the problem**, and only **after** step 3: run `backend/sql/rollback/019_attempt_integrity_down.sql`. It removes 019's functions, trigger and constraints and touches no rows. The current backend cannot run without 019, so never combine this with the current backend.
 6. **Verify:** test login → start → answer → submit on staging, then run the audit query.
 7. **Last resort** (data corruption only): restore the section 0 snapshot. Any attempts recorded after the snapshot are lost.
@@ -209,6 +227,22 @@ Database migrations 001–019 are **additive**. Roll back the application first;
 | Device session | | | |
 | Exam timer | | | |
 | Admin monitoring | | | |
+| 400-student staging load rehearsal (PASS / FAIL / NOT RUN) | | | |
 | Audit query clean | | | |
 
 Production deployment is a separate, later decision.
+
+## 10. Controlled staging load rehearsal (~400 students)
+
+**This is a staging-only test plan, not a claim that 400 students are supported. Do not target production. Do not run until the staging owner approves the test window and data set.**
+
+1. Confirm the student site, admin site, backend, registration project, and exam project all point to isolated staging resources. Verify the API host is staging before starting the load generator.
+2. Create a dedicated cohort of 400 paid-success test registrations with unique registration IDs/hall tickets, all matching the test class. Use no real student records. Prepare an exam with a representative question count and duration; confirm exactly one staging exam is ACTIVE.
+3. Take/verify a staging snapshot. Ensure the test cohort and exam can be removed or restored without affecting non-test data. Keep a separate admin browser for monitoring; do not use production credentials.
+4. Start Supabase/backend metrics capture: API latency/error rate, database CPU/connections, connection-pool saturation, locks, backend memory/restarts, and application logs. Record baseline for 10 minutes.
+5. Run from a load generator near the staging region. Ramp 0→50→100→200→300→400 virtual students over at least 10 minutes, holding each step for 3 minutes. Use one isolated account per virtual student and the normal login → preflight → start → question fetch → answer/draft save → submit flow.
+6. At 400 students, sustain the exam workload for 30 minutes. Include one synchronized question timeout/advance wave, a reconnect wave with queued retries, and 2–3 concurrent admin Live Students/Violations viewers. Keep all test runs within the approved staging window.
+7. **Abort immediately** if student data crosses environments; attempts/answers duplicate or disappear; any correct answer is lost; error rate exceeds 2% for 2 consecutive minutes; p95 API latency exceeds 2 seconds for 5 minutes; database CPU stays above 85% for 5 minutes; pool saturation or database errors persist for 1 minute; or backend restarts/OOM occur.
+8. Pass only if all 400 virtual students complete, there are zero lost/duplicated answers and unexpected attempt rows, retries are idempotent, error rate stays below 1% after warm-up, p95 stays below 1 second for ordinary requests, no sustained resource threshold is breached, and the post-run attempt consistency audit has no new non-legacy findings.
+9. Save the load-generator output, time-series metrics, backend logs, audit output, cohort count, build/migration versions, and operator notes. Compare the before/after staging snapshot and remove test data only through the approved staging cleanup/restore procedure.
+10. Record **PASS/FAIL/NOT RUN** with the measured peak concurrency and results in the sign-off table. If this test is not run and reviewed, capacity for 400 students remains unverified.

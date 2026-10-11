@@ -3,7 +3,7 @@ import { ShieldAlert, Check, FileText } from 'lucide-react';
 import { Card, CardBody } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
-import { SearchInput, Select } from '../components/ui/Form';
+import { SearchInput, Select, TextInput } from '../components/ui/Form';
 import { PageContainer } from '../components/ui/PageHeader';
 import { EmptyState } from '../components/ui/States';
 import { Modal } from '../components/ui/Modal';
@@ -12,7 +12,11 @@ import { AttemptAnswerSheet } from '../components/AttemptAnswerSheet';
 // One record per student attempt, built from the existing exam_events
 // table (GET /api/admin/proctoring/events) — see buildStudentViolations.
 import { fetchStudentViolations, VIOLATION_TYPE_OPTIONS } from '../../services/monitoring';
-import { reviewProctoringEvent } from '../../services/adminApi';
+import {
+  exportProctoringEventsCsv,
+  exportProctoringEventsXlsx,
+  reviewProctoringEvent,
+} from '../../services/adminApi';
 
 const POLL_MS = 15000;
 
@@ -24,6 +28,41 @@ type StudentViolations = {
   unreviewedIds: string[]; rules: { type: string; label: string; count: number }[]; reviewStatus: 'reviewed' | 'unreviewed';
 };
 
+function mergeViolationRecords(current: StudentViolations[], incoming: StudentViolations[]) {
+  const merged = new Map(current.map((record) => [record.id, record]));
+  for (const update of incoming) {
+    const previous = merged.get(update.id);
+    if (!previous) {
+      merged.set(update.id, update);
+      continue;
+    }
+    const eventsById = new Map([...previous.events, ...update.events].map((event) => [event.id, event]));
+    const events = Array.from(eventsById.values()).sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+    const countsByType: Record<string, number> = {};
+    for (const event of events) countsByType[event.type] = (countsByType[event.type] || 0) + 1;
+    const unreviewedIds = events.filter((event) => !event.reviewed).map((event) => event.id);
+    const rules = Object.entries(countsByType)
+      .map(([type, count]) => ({ type, label: events.find((event) => event.type === type)?.label || type, count }))
+      .sort((a, b) => b.count - a.count);
+    merged.set(update.id, {
+      ...previous,
+      ...update,
+      total: events.length,
+      countsByType,
+      lastAt: events[0]?.createdAt || previous.lastAt,
+      events,
+      unreviewedIds,
+      rules,
+      reviewStatus: unreviewedIds.length ? 'unreviewed' : 'reviewed',
+    });
+  }
+  return Array.from(merged.values()).sort(
+    (a, b) => new Date(b.lastAt).getTime() - new Date(a.lastAt).getTime()
+  );
+}
+
 export function ViolationsPage() {
   const [records, setRecords] = useState<StudentViolations[]>([]);
   const [loading, setLoading] = useState(true);
@@ -32,17 +71,29 @@ export function ViolationsPage() {
   const [examFilter, setExamFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
   const [reviewFilter, setReviewFilter] = useState('all');
+  const [classFilter, setClassFilter] = useState('');
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [sheetSessionId, setSheetSessionId] = useState<string | null>(null);
   const [reviewing, setReviewing] = useState(false);
   const [reviewError, setReviewError] = useState('');
 
   const polling = useRef(false);
+  const latestEventAt = useRef<string | null>(null);
 
-  const load = async () => {
+  const load = async (incremental = false) => {
     polling.current = true;
     try {
-      setRecords(await fetchStudentViolations());
+      const next = await fetchStudentViolations(incremental ? latestEventAt.current : null);
+      const newestEventAt = next.flatMap((record) => record.events).reduce<string | null>(
+        (latest, event) => !latest || new Date(event.createdAt) > new Date(latest) ? event.createdAt : latest,
+        latestEventAt.current
+      );
+      if (newestEventAt) latestEventAt.current = newestEventAt;
+      setRecords((current) => incremental ? mergeViolationRecords(current, next) : next);
       setLoadError('');
     } catch (err) {
       console.error('[ViolationsPage] refresh failed:', err);
@@ -58,7 +109,7 @@ export function ViolationsPage() {
     // Every refresh pages through all events, which grow during the exam.
     // Skip a tick while one is still running so slow responses never
     // stack up concurrent reloads (manual reloads after a review still run).
-    const interval = setInterval(() => { if (!polling.current) load(); }, POLL_MS);
+    const interval = setInterval(() => { if (!polling.current) load(true); }, POLL_MS);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -69,19 +120,70 @@ export function ViolationsPage() {
     return [{ value: 'all', label: 'All Exams' }, ...Array.from(exams, ([value, label]) => ({ value, label }))];
   }, [records]);
 
-  const filtered = useMemo(() => records.filter((r) => {
+  const filtered = useMemo(() => records.map((r) => {
     if (search) {
       const q = search.toLowerCase();
-      if (!`${r.studentName} ${r.registrationId}`.toLowerCase().includes(q)) return false;
+      if (!`${r.studentName} ${r.registrationId}`.toLowerCase().includes(q)) return null;
     }
-    if (examFilter !== 'all' && r.examId !== examFilter) return false;
-    if (typeFilter !== 'all' && !r.countsByType[typeFilter]) return false;
-    if (reviewFilter !== 'all' && r.reviewStatus !== reviewFilter) return false;
-    return true;
-  }), [records, search, examFilter, typeFilter, reviewFilter]);
+    if (examFilter !== 'all' && r.examId !== examFilter) return null;
+    if (classFilter.trim() && r.className.toLowerCase() !== `class ${classFilter.trim()}`.toLowerCase()) return null;
+    const visibleEvents = r.events.filter((event) => {
+      const at = new Date(event.createdAt).getTime();
+      if (from && at < new Date(`${from}T00:00:00.000Z`).getTime()) return false;
+      if (to && at > new Date(`${to}T23:59:59.999Z`).getTime()) return false;
+      if (typeFilter !== 'all' && event.type !== typeFilter) return false;
+      if (reviewFilter === 'reviewed' && !event.reviewed) return false;
+      if (reviewFilter === 'unreviewed' && event.reviewed) return false;
+      return true;
+    });
+    if (!visibleEvents.length) return null;
+    const countsByType: Record<string, number> = {};
+    for (const event of visibleEvents) countsByType[event.type] = (countsByType[event.type] || 0) + 1;
+    const unreviewedIds = visibleEvents.filter((event) => !event.reviewed).map((event) => event.id);
+    const rules = Object.entries(countsByType)
+      .map(([type, count]) => ({ type, label: visibleEvents.find((event) => event.type === type)?.label || type, count }))
+      .sort((a, b) => b.count - a.count);
+    return {
+      ...r,
+      events: visibleEvents,
+      total: visibleEvents.length,
+      countsByType,
+      unreviewedIds,
+      rules,
+      lastAt: visibleEvents[0].createdAt,
+      reviewStatus: unreviewedIds.length ? 'unreviewed' as const : 'reviewed' as const,
+    };
+  }).filter((r): r is StudentViolations => r !== null), [
+    records, search, examFilter, classFilter, typeFilter, reviewFilter, from, to,
+  ]);
 
   const selected = records.find((r) => r.id === selectedId) || null;
   const totalViolations = filtered.reduce((sum, r) => sum + (typeFilter === 'all' ? r.total : r.countsByType[typeFilter] || 0), 0);
+
+  const exportParams = {
+    ...(search.trim() ? { search: search.trim() } : {}),
+    ...(examFilter !== 'all' ? { examId: examFilter } : {}),
+    ...(typeFilter !== 'all' ? { eventType: typeFilter } : {}),
+    ...(reviewFilter !== 'all' ? { reviewed: String(reviewFilter === 'reviewed') } : {}),
+    ...(classFilter.trim() ? { className: classFilter.trim() } : {}),
+    ...(from ? { from } : {}),
+    ...(to ? { to } : {}),
+  };
+
+  const download = async (format: 'csv' | 'xlsx') => {
+    setExporting(true);
+    setExportError('');
+    try {
+      await (format === 'csv'
+        ? exportProctoringEventsCsv(exportParams)
+        : exportProctoringEventsXlsx(exportParams));
+    } catch (err) {
+      console.error(`[ViolationsPage] ${format.toUpperCase()} export failed:`, err);
+      setExportError(err instanceof Error ? err.message : 'Unable to export violations. Please retry.');
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const markReviewed = async (record: StudentViolations) => {
     setReviewing(true);
@@ -103,9 +205,23 @@ export function ViolationsPage() {
   return (
     <PageContainer>
       <div className="mb-6">
-        <h1 className="text-xl font-bold text-ink-900 tracking-tight">Violations</h1>
-        <p className="text-sm text-ink-500 mt-1">Proctoring violations per student attempt, with how many times each rule was broken. Most recent first.</p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-bold text-ink-900 tracking-tight">Violations</h1>
+            <p className="text-sm text-ink-500 mt-1">Proctoring violations per student attempt, with how many times each rule was broken. Most recent first.</p>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="secondary" icon={<FileText size={14} />} disabled={exporting} onClick={() => download('csv')}>
+              {exporting ? 'Preparing…' : 'Export CSV'}
+            </Button>
+            <Button variant="secondary" icon={<FileText size={14} />} disabled={exporting} onClick={() => download('xlsx')}>
+              {exporting ? 'Preparing…' : 'Export Excel'}
+            </Button>
+          </div>
+        </div>
       </div>
+
+      {exportError && <div className="mb-4 rounded-lg bg-danger-50 border border-danger-200 px-3 py-2.5 text-sm text-danger-700" role="alert">{exportError}</div>}
 
       {loadError && (
         <div className="mb-4 rounded-lg bg-danger-50 border border-danger-200 px-3 py-2.5 text-sm text-danger-700" role="alert">{loadError}</div>
@@ -120,6 +236,11 @@ export function ViolationsPage() {
             <Select value={examFilter} onChange={setExamFilter} options={examOptions} />
             <Select value={typeFilter} onChange={setTypeFilter} options={[{ value: 'all', label: 'All Violation Types' }, ...VIOLATION_TYPE_OPTIONS]} />
             <Select value={reviewFilter} onChange={setReviewFilter} options={[{ value: 'all', label: 'All Review States' }, { value: 'unreviewed', label: 'Unreviewed' }, { value: 'reviewed', label: 'Reviewed' }]} />
+          </div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <TextInput value={classFilter} onChange={setClassFilter} placeholder="Class name (exact)…" />
+            <label className="text-xs text-ink-500">From<TextInput type="date" value={from} onChange={setFrom} /></label>
+            <label className="text-xs text-ink-500">Through<TextInput type="date" value={to} onChange={setTo} /></label>
           </div>
         </CardBody>
       </Card>

@@ -19,7 +19,7 @@ function isNonEmptyString(value) {
 // to break (or extend) the filter expression.
 function sanitizeSearchTerm(value) {
     if (typeof value !== "string") return "";
-    return value.replace(/[,()*%\\]/g, " ").trim().slice(0, 100);
+    return value.replace(/[,()*%_\\]/g, " ").trim().slice(0, 100);
 }
 
 // Student login identifiers (Registration ID, Hall Ticket Number) as typed:

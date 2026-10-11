@@ -4,6 +4,7 @@
 // Test-only: never imported by application code.
 const crypto = require("node:crypto");
 const { loginRpc } = require("./loginRpc");
+const { monitoringRpc } = require("./monitoringRpc");
 
 // Unique constraints mirrored from backend/sql/*.sql. `where` makes a
 // constraint partial (exam_sessions_one_in_progress_per_candidate).
@@ -54,7 +55,7 @@ function project(db, row, spec) {
     if (!spec || spec.trim() === "*") return { ...row };
     const out = {};
     for (const part of splitTopLevel(spec.replace(/\s+/g, " "))) {
-        const embed = part.match(/^([a-z_]+)\((.*)\)$/s);
+        const embed = part.match(/^([a-z_]+)(?:![a-z_]+)?\((.*)\)$/s);
         if (embed) {
             const [, name, sub] = embed;
             const target = (db.tables[name] || []).find((r) => r.id === row[EMBED_FK[name]]);
@@ -66,6 +67,34 @@ function project(db, row, spec) {
         }
     }
     return out;
+}
+
+function relatedRow(db, table, row) {
+    const foreignKey = EMBED_FK[table];
+    return foreignKey ? (db.tables[table] || []).find((related) => related.id === row[foreignKey]) : null;
+}
+
+function nestedValue(db, baseTable, row, path) {
+    const parts = path.split(".");
+    let currentTable = baseTable;
+    let currentRow = row;
+    for (let index = 0; index < parts.length - 1; index++) {
+        currentTable = parts[index];
+        currentRow = relatedRow(db, currentTable, currentRow);
+        if (!currentRow) return undefined;
+    }
+    return currentRow?.[parts[parts.length - 1]];
+}
+
+function relatedPathRow(db, baseTable, row, path) {
+    let currentTable = baseTable;
+    let currentRow = row;
+    for (const relation of path.split(".")) {
+        currentTable = relation;
+        currentRow = relatedRow(db, currentTable, currentRow);
+        if (!currentRow) return null;
+    }
+    return currentRow;
 }
 
 function violatesUnique(db, table, candidate, ignoreRow) {
@@ -113,16 +142,33 @@ class Query {
     update(payload) { this.op = "update"; this.payload = payload; return this; }
     delete() { this.op = "delete"; return this; }
 
-    eq(col, value) { this.filters.push((r) => r[col] === value); return this; }
-    neq(col, value) { this.filters.push((r) => r[col] !== value); return this; }
+    eq(col, value) { this.filters.push((r) => nestedValue(this.db, this.table, r, col) === value); return this; }
+    neq(col, value) { this.filters.push((r) => nestedValue(this.db, this.table, r, col) !== value); return this; }
     in(col, values) { this.filters.push((r) => values.includes(r[col])); return this; }
     is(col, value) { this.filters.push((r) => (r[col] ?? null) === value); return this; }
-    gte(col, value) { this.filters.push((r) => r[col] != null && r[col] >= value); return this; }
+    gte(col, value) { this.filters.push((r) => { const actual = nestedValue(this.db, this.table, r, col); return actual != null && actual >= value; }); return this; }
+    lte(col, value) { this.filters.push((r) => { const actual = nestedValue(this.db, this.table, r, col); return actual != null && actual <= value; }); return this; }
     not(col, operator, value) {
         if (operator === "is") this.filters.push((r) => (r[col] ?? null) !== value);
         return this;
     }
-    or() { return this; }
+    or(expression, { foreignTable } = {}) {
+        const conditions = String(expression).split(",").map((condition) => {
+            const match = condition.match(/^([a-z_]+)\.ilike\.(.+)$/i);
+            if (!match) throw new Error(`Unsupported test query OR condition: ${condition}`);
+            return { column: match[1], pattern: match[2] };
+        });
+        this.filters.push((row) => {
+            const target = foreignTable
+                ? relatedPathRow(this.db, this.table, row, foreignTable)
+                : row;
+            return Boolean(target && conditions.some(({ column, pattern }) => {
+                const regex = new RegExp(`^${pattern.split("%").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`, "i");
+                return typeof target[column] === "string" && regex.test(target[column]);
+            }));
+        });
+        return this;
+    }
     // Postgres ILIKE: case-insensitive, `%` any run, `_` one char, `\` escapes.
     ilike(col, pattern) {
         const source = String(pattern).replace(/\\(.)|([%_])|([^\\%_])/g, (m, escaped, wild, plain) =>
@@ -242,6 +288,10 @@ function createMemorySupabase(seed = {}) {
         db,
         from: (table) => new Query(db, table),
         rpc: async (name, args = {}) => {
+            const monitoringResult = monitoringRpc(db, name, args);
+            if (monitoringResult !== undefined) return monitoringResult;
+            const eventResult = require('./eventRpc').eventRpc(db, name, args);
+            if (eventResult !== undefined) return eventResult;
             const loginResult = loginRpc(db, name, args);
             if (loginResult !== undefined) return loginResult;
             const { attemptRpc } = require("./attemptRpc");

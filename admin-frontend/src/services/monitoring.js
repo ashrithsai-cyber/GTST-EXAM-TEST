@@ -2,7 +2,9 @@
 // "which student does this session/event belong to" plus per-event-type
 // counts, computed from the same two endpoints (sessions + proctoring
 // events). Centralized here so the two pages stay consistent.
-import { listCandidates, listSessions, listProctoringEvents, listSubjects, listQuestions, listClasses } from "./adminApi";
+import {
+  listCandidates, listSessions, listProctoringEvents, summarizeMonitoringEvents,
+} from "./adminApi";
 
 // exam_events.event_type only ever contains these values (see
 // backend/src/controllers/proctoring.controller.js ALLOWED_EVENTS).
@@ -17,9 +19,6 @@ const CAMERA_EVENT_TYPES = new Set(["MULTIPLE_FACE", "NO_FACE", "CAMERA_DISABLED
 // every 10s. Without this, anyone who closed the tab would stay "online"
 // on Live Students forever.
 const PRESENCE_STALE_AFTER_MS = 2 * 60 * 1000;
-const examLayoutCache = new Map();
-const loadedExamLayouts = new Set();
-
 // is_likely_disconnected comes straight from the backend (admin.controller.js
 // listSessions) — a real, honestly-labeled proxy from last_activity_at
 // staleness, not a true heartbeat. See that file's isLikelyDisconnected().
@@ -54,43 +53,13 @@ export function statusLabel(session) {
   return PRESENCE_LABELS[session.presence_stage] || "In Exam";
 }
 
-// Question-bank layout (subjects, in order, with question counts) is
-// cached per exam_id so a monitoring poll only re-fetches it once per
-// distinct exam, not once per student.
-export async function buildExamLayoutCache(examIds) {
-  const cache = examLayoutCache;
-  await Promise.all(
-    Array.from(new Set(examIds.filter(Boolean))).map(async (examId) => {
-      if (loadedExamLayouts.has(examId)) return;
-      const { classes } = await listClasses(examId);
-      await Promise.all(classes.map(async (classRow) => {
-        const { subjects } = await listSubjects(classRow.id);
-        const ordered = subjects.sort((a, b) => a.display_order - b.display_order);
-        const withCounts = await Promise.all(ordered.map(async (subject) => ({
-          name: subject.subject_name,
-          count: (await listQuestions(subject.id)).questions.length,
-        })));
-        cache.set(classRow.id, withCounts);
-      }));
-      loadedExamLayouts.add(examId);
-    })
-  );
-  return cache;
-}
-
-export function progressForSession(session, layout) {
-  if (!layout) return { attempted: 0, total: 0, currentSubject: "—" };
-
-  const total = layout.reduce((sum, s) => sum + s.count, 0);
-  const subjectIndex = session.current_subject_index || 0;
-  const attempted =
-    layout.slice(0, subjectIndex).reduce((sum, s) => sum + s.count, 0) +
-    (session.current_question_index || 0);
-
+export function progressForSession(session) {
+  const snapshot = session.attempt_progress;
   return {
-    attempted: Math.min(attempted, total),
-    total,
-    currentSubject: layout[subjectIndex]?.name || "Completed",
+    attempted: snapshot?.attempted || 0,
+    total: snapshot?.total || 0,
+    currentSubject: snapshot?.current_subject || "—",
+    available: Boolean(snapshot && snapshot.total > 0),
   };
 }
 
@@ -116,6 +85,25 @@ export function countEventsBySession(events) {
     if (event.event_type === "MICROPHONE_DISABLED") counters.microphoneLosses += 1;
     if (event.event_type === "RIGHT_CLICK") counters.rightClicks += 1;
     if (event.event_type === "NETWORK_DISCONNECT") counters.networkDrops += 1;
+  }
+  return bySession;
+}
+
+function countSummariesBySession(summaries) {
+  const bySession = new Map();
+  for (const summary of summaries) {
+    const counts = summary.event_counts || {};
+    bySession.set(summary.session_id, {
+      violationCount: summary.violation_count ?? 0,
+      cameraChanges: Array.from(CAMERA_EVENT_TYPES).reduce((total, type) => total + (counts[type] || 0), 0),
+      tabSwitches: counts.TAB_SWITCH || 0,
+      fullscreenExits: counts.FULLSCREEN_EXIT || 0,
+      microphoneLosses: counts.MICROPHONE_DISABLED || 0,
+      rightClicks: counts.RIGHT_CLICK || 0,
+      networkDrops: counts.NETWORK_DISCONNECT || 0,
+      locationEvents: 0,
+      remoteDesktopEvents: 0,
+    });
   }
   return bySession;
 }
@@ -208,10 +196,11 @@ export async function fetchMonitoringData() {
     return { ...first, [key]: [first[key] || [], ...rest.map((page) => page[key] || [])].flat() };
   };
 
-  const [sessionsRes, eventsRes] = await Promise.all([
-    fetchAll((params) => listSessions(params), { status: "IN_PROGRESS,BLOCKED,SUBMITTED" }, "sessions"),
-    fetchAll((params) => listProctoringEvents(params), {}, "events"),
-  ]);
+  const sessionsRes = await fetchAll(
+    (params) => listSessions(params),
+    { status: "IN_PROGRESS,BLOCKED,SUBMITTED" },
+    "sessions"
+  );
 
   const candidatesRes = await fetchAll((params) => listCandidates(params), {}, "candidates");
   const sessions = [...(sessionsRes.sessions || [])];
@@ -245,23 +234,35 @@ export async function fetchMonitoringData() {
     });
   }
 
-  const events = eventsRes.events;
+  const sessionIds = sessions.filter((session) => !session.id.startsWith("presence-")).map((session) => session.id);
+  const summaryRequests = [];
+  for (let index = 0; index < sessionIds.length; index += 250) {
+    summaryRequests.push(summarizeMonitoringEvents(sessionIds.slice(index, index + 250)));
+  }
+  let monitoringWarning = sessionsRes.monitoringWarning || null;
+  const summaryResponses = await Promise.all(summaryRequests.map(async request => {
+    try {
+      return await request;
+    } catch (error) {
+      if (error.data?.code !== "MONITORING_MIGRATION_REQUIRED") throw error;
+      monitoringWarning = error.message;
+      return { summaries: [] };
+    }
+  }));
+  const eventCounts = countSummariesBySession(summaryResponses.flatMap((response) => response.summaries || []));
 
-  const [layoutCache] = await Promise.all([
-    buildExamLayoutCache(sessions.map((s) => s.exam_id)),
-  ]);
-
-  const eventCounts = countEventsBySession(events);
-
-  return { sessions, events, layoutCache, examsMap: new Map(), eventCounts };
+  return { sessions, examsMap: new Map(), eventCounts, monitoringWarning };
 }
 
-export async function fetchStudentViolations() {
-  const first = await listProctoringEvents({ page: 1 });
+/** @param {string | null} [createdAfter] */
+export async function fetchStudentViolations(createdAfter = null) {
+  const filters = createdAfter ? { createdAfter } : {};
+  const first = await listProctoringEvents({ ...filters, page: 1 });
   const pages = Math.ceil((first.total || 0) / (first.limit || 100));
-  const rest = await Promise.all(Array.from({ length: Math.max(0, pages - 1) }, (_, index) =>
-    listProctoringEvents({ page: index + 2 })
-  ));
+  const rest = [];
+  for (let page = 2; page <= pages; page += 1) {
+    rest.push(await listProctoringEvents({ ...filters, page }));
+  }
   const events = [first.events || [], ...rest.map((page) => page.events || [])].flat();
   return buildStudentViolations(events);
 }

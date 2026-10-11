@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, FileText, Clock, Users, Pencil, Trash2, Power, BookOpen, Check, X, Timer, CalendarClock, Trophy } from 'lucide-react';
+import { Plus, FileText, Clock, Users, Pencil, Trash2, Power, BookOpen, Check, X, Timer, CalendarClock, Trophy, RotateCcw } from 'lucide-react';
 import { Card, CardBody, CardHeader } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -12,7 +12,7 @@ import type { Exam } from '../lib/types';
 // Exam/class CRUD reused verbatim from the existing admin dashboard's
 // already-hardened adapter layer — not re-derived against raw API rows.
 import { fetchExamsWithTree, addExam, updateExamDetails, setExamStatus, setResultsPublished, removeExam, clearExamTiming, addClass, removeClass } from '../../services/questionBank';
-import { listSessions } from '../../services/adminApi';
+import { listSessions, resetExamAttempts } from '../../services/adminApi';
 
 // examStartDate/examStartTime are the IST wall-clock date/time inputs
 // (converted to a UTC instant via istToUtcIso only on save) — kept as
@@ -36,6 +36,14 @@ export function ExamsPage({ onManageClass }: { onManageClass: (classId: string, 
   const [editing, setEditing] = useState<EditState | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<Exam | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState('');
+  const [deleteError, setDeleteError] = useState('');
+  const [deleting, setDeleting] = useState(false);
+  const [confirmReset, setConfirmReset] = useState<Exam | null>(null);
+  const [resetConfirmation, setResetConfirmation] = useState('');
+  const [resetError, setResetError] = useState('');
+  const [resetting, setResetting] = useState(false);
+  const [resetNotice, setResetNotice] = useState('');
   const [addingClassFor, setAddingClassFor] = useState<string | null>(null);
   const [newClassName, setNewClassName] = useState('');
   const [confirmDeleteClass, setConfirmDeleteClass] = useState<{ examId: string; classId: string; className: string } | null>(null);
@@ -196,18 +204,42 @@ export function ExamsPage({ onManageClass }: { onManageClass: (classId: string, 
   };
 
   const handleDeleteExam = async () => {
-    if (!confirmDelete) return;
+    if (!confirmDelete || deleteConfirmation !== confirmDelete.name || deleting) return;
+    setDeleting(true);
+    setDeleteError('');
     try {
       await removeExam(confirmDelete.id);
       setConfirmDelete(null);
+      setDeleteConfirmation('');
       await load();
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Unable to delete exam.');
+      setDeleteError(err instanceof Error ? err.message : 'Unable to delete exam.');
+      await load();
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleResetAttempts = async () => {
+    if (!confirmReset || resetConfirmation !== confirmReset.name || resetting) return;
+    setResetting(true);
+    setResetError('');
+    try {
+      const result = await resetExamAttempts(confirmReset.id);
+      setResetNotice(`${result.deletedAttempts} attempts, ${result.deletedAnswers} answers and ${result.deletedEvents} violation/events cleared. ${result.releasedLoginSessions} students signed out and can log in again.`);
+      setConfirmReset(null);
+      setResetConfirmation('');
+      await load();
+    } catch (err) {
+      setResetError(err instanceof Error ? err.message : 'Unable to reset this exam.');
+    } finally {
+      setResetting(false);
     }
   };
 
   return (
     <PageContainer>
+      {resetNotice && <div className="mb-4 rounded-lg bg-success-50 border border-success-200 px-3 py-2.5 text-sm text-success-700" role="status">{resetNotice}</div>}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
         <div>
           <h1 className="text-xl font-bold text-ink-900 tracking-tight">Exams</h1>
@@ -320,6 +352,9 @@ export function ExamsPage({ onManageClass }: { onManageClass: (classId: string, 
 
                 <div className="mt-auto flex items-center gap-2 pt-3 border-t border-ink-100">
                   <Button size="sm" variant="secondary" icon={<Pencil size={14} />} onClick={() => openEdit(exam)}>Edit</Button>
+                  <Button size="sm" variant="danger" icon={<RotateCcw size={14} />} disabled={exam.status === 'ACTIVE' || resetting} onClick={() => { setResetError(''); setResetConfirmation(''); setConfirmReset(exam); }} title={exam.status === 'ACTIVE' ? 'Deactivate this exam before resetting attempts' : 'Clear this exam’s student attempts'}>
+                    Reset Students
+                  </Button>
                   <Button
                     size="sm"
                     variant="secondary"
@@ -332,7 +367,7 @@ export function ExamsPage({ onManageClass }: { onManageClass: (classId: string, 
                   <Button size="sm" variant={exam.status === 'ACTIVE' ? 'danger' : 'success'} icon={<Power size={14} />} onClick={() => toggleActive(exam)} className="ml-auto">
                     {exam.status === 'ACTIVE' ? 'Deactivate' : 'Activate'}
                   </Button>
-                  <button onClick={() => setConfirmDelete(exam)} className="rounded-lg p-2 text-ink-400 hover:bg-danger-50 hover:text-danger-600 transition-colors" title="Delete">
+                  <button onClick={() => { setDeleteConfirmation(''); setDeleteError(''); setConfirmDelete(exam); }} className="rounded-lg p-2 text-ink-400 hover:bg-danger-50 hover:text-danger-600 transition-colors" title="Permanently delete exam">
                     <Trash2 size={16} />
                   </button>
                 </div>
@@ -394,17 +429,40 @@ export function ExamsPage({ onManageClass }: { onManageClass: (classId: string, 
       </Modal>
 
       <Modal
-        open={!!confirmDelete}
-        onClose={() => setConfirmDelete(null)}
-        title="Delete Exam"
-        size="sm"
-        footer={<><Button variant="secondary" onClick={() => setConfirmDelete(null)}>Cancel</Button><Button variant="danger" onClick={handleDeleteExam}>Delete</Button></>}
+        open={!!confirmReset}
+        onClose={() => { if (!resetting) { setConfirmReset(null); setResetConfirmation(''); setResetError(''); } }}
+        title="Reset all student attempts?"
+        subtitle={confirmReset?.name}
+        size="md"
+        footer={<><Button variant="secondary" disabled={resetting} onClick={() => { setConfirmReset(null); setResetConfirmation(''); setResetError(''); }}>Cancel</Button><Button variant="danger" disabled={resetting || resetConfirmation !== confirmReset?.name} onClick={handleResetAttempts}>{resetting ? 'Resetting…' : 'Permanently reset exam'}</Button></>}
       >
-        <p className="text-sm text-ink-600">
-          Are you sure you want to delete <span className="font-semibold text-ink-900">{confirmDelete?.name}</span>?
-          This will also remove all associated classes, subjects and questions. This action cannot be undone.
+        <div className="space-y-3 text-sm text-ink-600">
+          <p>This permanently removes all attempts, saved answers, scores, and proctoring events for this exam. Students associated with its classes will be signed out, and they must log in again to start a new attempt.</p>
+          <p>Exam questions, registrations, settings, and stored check-in photos are retained. This cannot be undone. The exam must be inactive and have no in-progress attempts.</p>
+          {resetError && <p className="rounded-lg bg-danger-50 border border-danger-200 px-3 py-2.5 text-danger-700" role="alert">{resetError}</p>}
+          <Field label={`Type "${confirmReset?.name}" to confirm`}>
+            <TextInput value={resetConfirmation} onChange={setResetConfirmation} placeholder={confirmReset?.name || ''} />
+          </Field>
+        </div>
+      </Modal>
+
+      <Modal
+        open={!!confirmDelete}
+        onClose={() => { if (!deleting) { setConfirmDelete(null); setDeleteConfirmation(''); setDeleteError(''); } }}
+        title="Permanently delete exam?"
+        subtitle={confirmDelete?.name}
+        size="md"
+        footer={<><Button variant="secondary" disabled={deleting} onClick={() => { setConfirmDelete(null); setDeleteConfirmation(''); setDeleteError(''); }}>Cancel</Button><Button variant="danger" disabled={deleting || deleteConfirmation !== confirmDelete?.name} onClick={handleDeleteExam}>{deleting ? 'Deleting…' : 'Permanently delete'}</Button></>}
+      >
+        <div className="space-y-3 text-sm text-ink-600">
+          <p>This permanently deletes the exam, all attempts, saved answers, scores, proctoring events, classes, subjects, questions, and stored check-in photos. Student registration records are retained. This cannot be undone.</p>
           {confirmDelete?.status === 'ACTIVE' && <span className="block mt-2 text-warning-600">This exam is currently ACTIVE — deactivate it first.</span>}
-        </p>
+          <p>The exam cannot be deleted while students have attempts in progress.</p>
+          {deleteError && <p className="rounded-lg bg-danger-50 border border-danger-200 px-3 py-2.5 text-danger-700" role="alert">{deleteError}</p>}
+          <Field label={`Type "${confirmDelete?.name}" to confirm`}>
+            <TextInput value={deleteConfirmation} onChange={setDeleteConfirmation} placeholder={confirmDelete?.name || ''} />
+          </Field>
+        </div>
       </Modal>
 
       <Modal
